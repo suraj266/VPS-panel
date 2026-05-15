@@ -1,0 +1,180 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String
+  role         String     @default("admin")
+  totpSecret   String? // base32 secret, set when 2FA setup is initiated
+  totpEnabled  Boolean    @default(false) // flipped to true after first valid code
+  createdAt    DateTime   @default(now())
+  sessions     Session[]
+  auditLogs    AuditLog[]
+}
+
+model Session {
+  id        String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// Singleton row (id == "global") storing panel-wide settings — currently just
+// the panel's own public domain + SSL state. Lets the operator configure
+// `panel.example.com` from inside the UI instead of editing nginx by hand.
+model PanelSettings {
+  id                 String    @id @default("global")
+  panelDomain        String?
+  panelSslEnabled    Boolean   @default(false)
+  panelCertEmail     String?
+  panelCertExpiresAt DateTime?
+  updatedAt          DateTime  @updatedAt
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  apps        App[]
+}
+
+model App {
+  id                    String              @id @default(cuid())
+  slug                  String              @unique
+  // Nullable for backward compatibility — on boot, any null projectId is
+  // backfilled to the auto-created "Default" project. UI treats null as
+  // default group too. After all installs migrate cleanly we can tighten.
+  projectId             String?
+  project               Project?            @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  description           String?
+  sourceType            String // "prebuilt-image" | "git-repo"
+  buildMode             String? // git-repo only: "dockerfile" | "static" | "compose"
+  publishDir            String? // static mode only: directory inside repo to serve (default ".")
+  composePath           String? // compose mode only: path to compose file (default "docker-compose.yml")
+  imageRef              String?
+  repoUrl               String? // raw clone URL (legacy PAT mode)
+  branch                String?
+  dockerfilePath        String? // dockerfile mode only: path to Dockerfile (default "Dockerfile")
+  gitTokenEncrypted     String? // PAT for private repos, encrypted with PANEL_MASTER_KEY
+  webhookSecret         String? // per-app shared secret for legacy PAT mode webhooks
+  // GitHub App mode: linked to an installation + repo full name. When set, the
+  // panel mints short-lived installation tokens for cloning instead of using a
+  // stored PAT. Webhooks come through the global GitHub App receiver.
+  githubInstallationId  String?
+  githubInstallation    GithubInstallation? @relation(fields: [githubInstallationId], references: [id], onDelete: SetNull)
+  githubRepoFullName    String? // e.g. "octocat/hello-world"
+  githubRepoId          Int?
+  buildConfig           Json?
+  runtimeConfig         Json?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  envVars               EnvVar[]
+  domains               Domain[]
+  deployments           Deployment[]
+
+  @@index([githubInstallationId])
+  @@index([githubRepoFullName])
+  @@index([projectId])
+}
+
+// One row per registered GitHub App. A user can register multiple apps (e.g.
+// one for personal accounts, another shared with an org), each with its own
+// credentials. Stored credentials are encrypted with PANEL_MASTER_KEY.
+model GithubApp {
+  id               String               @id @default(cuid())
+  githubAppId      Int                  @unique // GitHub's numeric ID for the app
+  slug             String               @unique // e.g. "vps-panel-suraj"
+  name             String
+  privateKeyEnc    String // AES-GCM encrypted PEM
+  webhookSecretEnc String // AES-GCM encrypted
+  clientId         String
+  clientSecretEnc  String // AES-GCM encrypted
+  htmlUrl          String // https://github.com/apps/<slug>
+  createdBy        String? // user id who registered it (nullable for safety)
+  createdAt        DateTime             @default(now())
+  installations    GithubInstallation[]
+}
+
+// One row per installation of a GithubApp on an account (user or org). A
+// single GithubApp can have many installations. Kept in sync with GitHub via
+// `installation` and `installation_repositories` webhook events.
+model GithubInstallation {
+  id                  String   @id @default(cuid())
+  githubAppId         String
+  githubApp           GithubApp @relation(fields: [githubAppId], references: [id], onDelete: Cascade)
+  installationId      Int      @unique // GitHub's numeric installation ID
+  accountLogin        String
+  accountId           Int
+  accountType         String // "User" | "Organization"
+  accountAvatarUrl    String?
+  repositorySelection String // "all" | "selected"
+  suspendedAt         DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  apps                App[]
+
+  @@index([githubAppId])
+}
+
+model EnvVar {
+  id             String  @id @default(cuid())
+  appId          String
+  app            App     @relation(fields: [appId], references: [id], onDelete: Cascade)
+  key            String
+  valueEncrypted String
+  isSecret       Boolean @default(false)
+
+  @@unique([appId, key])
+}
+
+model Domain {
+  id            String    @id @default(cuid())
+  appId         String
+  app           App       @relation(fields: [appId], references: [id], onDelete: Cascade)
+  hostname      String    @unique
+  port          Int
+  serviceName   String? // compose apps only: which service to route to
+  sslEnabled    Boolean   @default(false)
+  certExpiresAt DateTime?
+}
+
+model Deployment {
+  id             String    @id @default(cuid())
+  appId          String
+  app            App       @relation(fields: [appId], references: [id], onDelete: Cascade)
+  imageTag       String
+  gitSha         String?
+  status         String // "queued" | "building" | "running" | "failed" | "succeeded"
+  log            String?
+  trigger        String    @default("manual") // "manual" | "webhook"
+  commitMessage  String?
+  startedAt      DateTime  @default(now())
+  finishedAt     DateTime?
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action     String
+  targetType String?
+  targetId   String?
+  diff       Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+}

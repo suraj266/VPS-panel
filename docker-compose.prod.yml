@@ -1,0 +1,114 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: panel_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-panel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-panel}
+    volumes:
+      - panel_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-panel}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - panel_net
+    # Postgres is only reached from inside the docker network in prod —
+    # don't publish to the host.
+
+  redis:
+    image: redis:7-alpine
+    container_name: panel_redis
+    restart: unless-stopped
+    volumes:
+      - panel_redis:/data
+    networks:
+      - panel_net
+
+  host:
+    # Privileged sidecar that exposes a shell on the VPS host. Reached from
+    # the panel UI via Host Shell. Root-equivalent on the host; only the
+    # auth-gated panel API can exec into it.
+    image: alpine:3.20
+    container_name: panel_host
+    restart: unless-stopped
+    privileged: true
+    pid: host
+    network_mode: host
+    volumes:
+      - /:/host
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache bash coreutils util-linux procps lsof curl ca-certificates iproute2 >/dev/null 2>&1
+        exec sleep infinity
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: panel_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Bind-mount conf.d so you can pre-place panel.conf before first boot.
+      # The panel writes app site configs (e.g. hello.local.conf) here too.
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - panel_nginx_certs:/etc/letsencrypt
+      - panel_nginx_webroot:/var/www/certbot
+    networks:
+      - panel_net
+
+  panel:
+    image: ${PANEL_IMAGE:-vps-panel:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: panel_app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      API_PORT: 4000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-panel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-panel}
+      REDIS_URL: redis://redis:6379
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      PANEL_MASTER_KEY: ${PANEL_MASTER_KEY:?set PANEL_MASTER_KEY in .env}
+      DOCKER_SOCKET: /var/run/docker.sock
+      CORS_ORIGIN: ${PANEL_ORIGIN:-http://localhost}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:?set ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
+      PANEL_WEB_DIST: /app/apps/web/dist
+      PANEL_BACKUP_DIR: /data/backups
+      PANEL_BUILD_DIR: /data/builds
+    volumes:
+      # Host Docker socket — gives the panel full control of the host's
+      # Docker daemon. This is by design.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - panel_backups:/data/backups
+      - panel_builds:/data/builds
+    networks:
+      - panel_net
+    # Do not publish 4000 directly — nginx fronts it via the site config.
+    # If you need direct access for debugging, uncomment:
+    # ports:
+    #   - "127.0.0.1:4000:4000"
+
+volumes:
+  panel_pg:
+  panel_redis:
+  panel_nginx_certs:
+  panel_nginx_webroot:
+  panel_backups:
+  panel_builds:
+
+networks:
+  panel_net:
+    name: panel_net
+    driver: bridge

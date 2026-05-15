@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: panel_postgres
+    environment:
+      POSTGRES_USER: panel
+      POSTGRES_PASSWORD: panel
+      POSTGRES_DB: panel
+    ports:
+      - "5433:5432"
+    volumes:
+      - panel_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U panel"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: panel_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - panel_redis:/data
+
+  host:
+    # Privileged sidecar that exposes a shell on the VPS host itself.
+    # Reached from the panel UI via Host Shell.
+    # SECURITY: root-equivalent access. Only the panel API (auth-gated)
+    # should be able to exec into this container.
+    image: alpine:3.20
+    container_name: panel_host
+    restart: unless-stopped
+    privileged: true
+    pid: host
+    network_mode: host
+    volumes:
+      - /:/host
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache bash coreutils util-linux procps lsof curl ca-certificates iproute2 >/dev/null 2>&1
+        exec sleep infinity
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: panel_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - panel_nginx_conf:/etc/nginx/conf.d
+      - panel_nginx_certs:/etc/letsencrypt
+      - panel_nginx_webroot:/var/www/certbot
+    networks:
+      - panel_net
+    restart: unless-stopped
+
+volumes:
+  panel_pg:
+  panel_redis:
+  panel_nginx_conf:
+  panel_nginx_certs:
+  panel_nginx_webroot:
+
+networks:
+  panel_net:
+    name: panel_net
+    driver: bridge

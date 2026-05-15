@@ -1,0 +1,36 @@
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/build
+**/.turbo
+
+# env
+.env
+.env.local
+.env.*.local
+
+# logs
+*.log
+
+# os
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode
+.idea
+
+# git
+.git
+.gitignore
+
+# local panel data
+.panel-builds
+.panel-backups
+
+# docs (not needed in image)
+PRD.md
+README.md
+*.md
+!apps/**/*.md

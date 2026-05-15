@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-feature-settings:
+    "cv02",
+    "cv03",
+    "cv04",
+    "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar polish for dark theme */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(51 65 85 / 0.5);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(71 85 105 / 0.7);
+}
+
+/* Smooth transitions for sidebar links */
+.nav-link {
+  @apply flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors;
+}
+.nav-link-active {
+  @apply bg-indigo-600/20 text-indigo-300 border border-indigo-500/30;
+}
+.nav-link-inactive {
+  @apply text-slate-400 hover:text-white hover:bg-slate-800/60 border border-transparent;
+}
+
+.card {
+  @apply bg-slate-900/60 border border-slate-800 rounded-xl;
+}

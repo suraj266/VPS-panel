@@ -1,0 +1,74 @@
+# Panel's own site config. Copy this to ./nginx/conf.d/panel.conf and edit
+# `server_name` to your domain before starting `docker compose up`.
+#
+#   mkdir -p nginx/conf.d
+#   cp deploy/nginx-panel.conf.example nginx/conf.d/panel.conf
+#   sed -i 's/panel.example.com/panel.YOURDOMAIN.com/' nginx/conf.d/panel.conf
+#
+# Once Let's Encrypt is set up (see README), swap to the HTTPS server block.
+
+server {
+    listen 80;
+    server_name panel.example.com;
+
+    # Allow Let's Encrypt HTTP-01 challenges (if/when you enable Certbot).
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    # WebSocket upgrades for /api/containers/:id/terminal and /api/containers/:id/logs/stream
+    location /api/ {
+        proxy_pass http://panel_app:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Everything else (the SPA + static assets) — Fastify serves it from
+    # /app/apps/web/dist with SPA fallback to index.html.
+    location / {
+        proxy_pass http://panel_app:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# Uncomment after issuing a Let's Encrypt cert for panel.YOURDOMAIN.com.
+# Then change the listen 80 block above to redirect to https.
+#
+# server {
+#     listen 443 ssl http2;
+#     server_name panel.YOURDOMAIN.com;
+#
+#     ssl_certificate     /etc/letsencrypt/live/panel.YOURDOMAIN.com/fullchain.pem;
+#     ssl_certificate_key /etc/letsencrypt/live/panel.YOURDOMAIN.com/privkey.pem;
+#
+#     location /api/ {
+#         proxy_pass http://panel_app:4000;
+#         proxy_http_version 1.1;
+#         proxy_set_header Host $host;
+#         proxy_set_header X-Real-IP $remote_addr;
+#         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#         proxy_set_header Upgrade $http_upgrade;
+#         proxy_set_header Connection "upgrade";
+#         proxy_read_timeout 3600s;
+#         proxy_send_timeout 3600s;
+#     }
+#
+#     location / {
+#         proxy_pass http://panel_app:4000;
+#         proxy_http_version 1.1;
+#         proxy_set_header Host $host;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#     }
+# }

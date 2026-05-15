@@ -1,0 +1,19 @@
+{
+  "name": "vps-panel",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"./apps/*\" dev",
+    "dev:services": "docker compose -f docker-compose.dev.yml up -d",
+    "dev:services:down": "docker compose -f docker-compose.dev.yml down",
+    "build": "pnpm --filter \"./apps/*\" build",
+    "typecheck": "pnpm --filter \"./apps/*\" typecheck",
+    "db:push": "pnpm --filter @panel/api db:push",
+    "db:migrate": "pnpm --filter @panel/api db:migrate",
+    "db:generate": "pnpm --filter @panel/api db:generate"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=22"
+  }
+}

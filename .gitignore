@@ -1,0 +1,88 @@
+# ============================================================
+#  Dependencies / build output
+# ============================================================
+node_modules
+dist
+build
+.next
+.turbo
+*.tsbuildinfo
+
+# ============================================================
+#  Secrets — NEVER commit
+# ============================================================
+# Local + production env files. Only .env*.example is committed.
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Anything that ends in .pem, .key, .crt — Let's Encrypt certs, SSH keys,
+# GitHub App private keys if anyone exports one for testing.
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Backup tarballs (DB dumps) — may contain encrypted secrets blob.
+*.sql
+*.sql.gz
+*.dump
+
+# ============================================================
+#  Operator-managed nginx configs (per-environment, contain hostnames)
+#  Keep the .example template, ignore the live copies the panel writes.
+# ============================================================
+nginx/conf.d/*
+!nginx/conf.d/.gitkeep
+
+# ============================================================
+#  Panel runtime data (created at runtime by the panel itself)
+# ============================================================
+.panel-builds/
+.panel-backups/
+data/
+
+# ============================================================
+#  Logs + crash output
+# ============================================================
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+lerna-debug.log*
+
+# ============================================================
+#  OS junk
+# ============================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============================================================
+#  Editor / IDE
+# ============================================================
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+.history/
+
+# ============================================================
+#  Coverage + test output
+# ============================================================
+coverage/
+.nyc_output/
+*.lcov
+
+# ============================================================
+#  Misc local notes (handy for not leaking personal scratchpads)
+# ============================================================
+NOTES.md
+TODO.local.md
+.scratch/
+prd.md
+.claude
