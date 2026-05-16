@@ -907,9 +907,17 @@ function PanelDomainSection() {
                       checked={sslStaging}
                       onChange={(e) => setSslStaging(e.target.checked)}
                     />
-                    Use Let's Encrypt staging (recommended for first try — no
-                    rate limits)
+                    Use Let's Encrypt staging (for testing only — staging certs
+                    are NOT trusted by browsers)
                   </label>
+                  {sslStaging && (
+                    <div className="text-xs bg-amber-950/40 border border-amber-900/50 rounded-lg px-3 py-2 text-amber-200">
+                      Staging certs are signed by "Fake LE Intermediate" and
+                      browsers will keep showing "Not secure". Only enable this
+                      if you're debugging cert issuance and don't care about
+                      browser trust. For real use, leave this <b>unchecked</b>.
+                    </div>
+                  )}
                   {issueSsl.error && (
                     <div className="text-red-400 text-sm bg-red-950/40 border border-red-900/50 rounded-lg px-3 py-2">
                       {(issueSsl.error as Error).message}

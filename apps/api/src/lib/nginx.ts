@@ -17,9 +17,47 @@ interface SiteConfigInput {
   sslEnabled: boolean;
 }
 
+// Common proxy block reused by HTTP-only and HTTPS server blocks. Pulled into
+// a constant so future tweaks (caching, gzip, body limits) live in one place.
+//
+// Notes:
+//  - Connection: $connection_upgrade — we set this via a server-level `map`
+//    so non-WebSocket requests get an empty Connection header (proper HTTP
+//    keep-alive) while WS upgrades still flow through. The old version
+//    always sent "upgrade", which confuses some backends.
+//  - proxy_buffers tuned for typical SPA bundles (200-500KB JS) so we don't
+//    spill responses to disk. nginx logged a warning about that on the SPA.
+function proxyBlock(upstreamUrl: string): string {
+  return `        proxy_pass ${upstreamUrl};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 300s;
+        proxy_buffers 16 16k;
+        proxy_buffer_size 32k;`;
+}
+
 export function siteConfigFor(input: SiteConfigInput): string {
   const { hostname, upstream, sslEnabled } = input;
   const upstreamUrl = `http://${upstream.host}:${upstream.port}`;
+
+  // Per-server-name `map` that turns the HTTP Upgrade request header into a
+  // proper Connection header value. WebSocket clients send `Upgrade: websocket`
+  // → we forward `Connection: upgrade`. Plain HTTP clients have no Upgrade
+  // header → we forward `Connection: ""` (defaults to keep-alive). Using a
+  // unique variable suffix per hostname so multiple site configs co-exist
+  // without "duplicate map" errors.
+  const mapName = `connection_upgrade_${hostname.replace(/[^a-z0-9]/gi, "_")}`;
+
+  const mapBlock = `map $http_upgrade $${mapName} {
+    default upgrade;
+    ''      "";
+}
+`;
 
   const httpServer = `
 server {
@@ -38,15 +76,7 @@ server {
         return 301 https://$host$request_uri;
     }`
         : `location / {
-        proxy_pass ${upstreamUrl};
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 300s;
+${proxyBlock(upstreamUrl).replace(/\$connection_upgrade/g, `$${mapName}`)}
     }`
     }
 }
@@ -56,28 +86,21 @@ server {
     ? `
 
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name ${hostname};
 
     ssl_certificate     /etc/letsencrypt/live/${hostname}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${hostname}/privkey.pem;
 
     location / {
-        proxy_pass ${upstreamUrl};
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 300s;
+${proxyBlock(upstreamUrl).replace(/\$connection_upgrade/g, `$${mapName}`)}
     }
 }
 `
     : "";
 
-  return httpServer + httpsServer + "\n";
+  return mapBlock + httpServer + httpsServer + "\n";
 }
 
 function buildTar(filename: string, content: string): NodeJS.ReadableStream {
