@@ -10,6 +10,7 @@ import {
   TerminalSquare,
   Plug,
   FolderKanban,
+  Activity,
 } from "lucide-react";
 import { api } from "../lib/api";
 
@@ -24,6 +25,7 @@ const items: NavItem[] = [
   { to: "/projects", label: "Projects", Icon: FolderKanban },
   { to: "/apps", label: "All apps", Icon: Boxes },
   { to: "/containers", label: "Containers", Icon: Container },
+  { to: "/monitoring", label: "Monitoring", Icon: Activity },
   { to: "/host", label: "Host shell", Icon: TerminalSquare },
   { to: "/integrations", label: "Integrations", Icon: Plug },
   { to: "/audit", label: "Audit log", Icon: ScrollText },

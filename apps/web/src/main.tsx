@@ -13,6 +13,7 @@ import { AuditPage } from "./pages/audit";
 import { SettingsPage } from "./pages/settings";
 import { HostShellPage } from "./pages/host-shell";
 import { IntegrationsPage } from "./pages/integrations";
+import { MonitoringPage } from "./pages/monitoring";
 import { RequireAuth } from "./components/require-auth";
 import "./index.css";
 
@@ -77,6 +78,14 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
             element={
               <RequireAuth>
                 <ContainersPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/monitoring"
+            element={
+              <RequireAuth>
+                <MonitoringPage />
               </RequireAuth>
             }
           />
