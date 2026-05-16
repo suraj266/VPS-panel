@@ -9,7 +9,9 @@ import {
   redeployToImageTag,
   removeAppContainer,
   stopAppContainer,
+  composeWorkDirFor,
 } from "../lib/deploy.js";
+import { parseComposeServices } from "../lib/compose.js";
 import { encrypt } from "../lib/crypto.js";
 import { generateWebhookSecret } from "../lib/webhook.js";
 import { recordAudit } from "../lib/audit.js";
@@ -337,5 +339,33 @@ export const appRoutes: FastifyPluginAsync = async (app) => {
       targetId: id,
     });
     return { webhookSecret: secret };
+  });
+
+  // Parse the app's compose file and return its services (with port hints) so
+  // the domain-binding UI can offer a dropdown instead of asking the user to
+  // type the service name manually.
+  app.get("/apps/:id/compose/services", async (req, reply) => {
+    requireAuth(req);
+    const { id } = idParam.parse(req.params);
+    const found = await prisma.app.findUnique({ where: { id } });
+    if (!found) return reply.code(404).send({ error: "not found" });
+    if (found.sourceType !== "git-repo" || found.buildMode !== "compose") {
+      return reply
+        .code(400)
+        .send({ error: "this app is not a compose-source app" });
+    }
+    const workDir = composeWorkDirFor(found.slug);
+    const composeFile = found.composePath ?? "docker-compose.yml";
+    try {
+      const services = await parseComposeServices(workDir, composeFile);
+      return { services };
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "compose file not found";
+      return reply.code(404).send({
+        error: message,
+        hint: "Deploy the app at least once so the compose file is cached locally.",
+      });
+    }
   });
 };

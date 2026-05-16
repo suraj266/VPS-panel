@@ -33,6 +33,7 @@
     "simple-git": "^3.27.0",
     "tar-fs": "^3.0.6",
     "tar-stream": "^3.1.7",
+    "yaml": "^2.6.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

@@ -475,6 +475,29 @@ function DomainsSection({
   const [serviceName, setServiceName] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  // For compose apps, auto-detect services from docker-compose.yml so the
+  // user picks from a dropdown instead of typing.
+  const services = useQuery({
+    queryKey: ["compose-services", appId],
+    queryFn: () =>
+      api<{
+        services: Array<{ name: string; image: string | null; ports: number[] }>;
+      }>(`/apps/${appId}/compose/services`),
+    enabled: isCompose && showAdd,
+    retry: false,
+  });
+
+  // Pre-select first service + its first port when the list arrives.
+  useEffect(() => {
+    if (!isCompose || !services.data?.services.length) return;
+    if (!serviceName) {
+      const first = services.data.services[0]!;
+      setServiceName(first.name);
+      if (first.ports.length > 0) setPort(String(first.ports[0]));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [services.data]);
+
   const add = useMutation({
     mutationFn: (body: {
       hostname: string;
@@ -598,14 +621,49 @@ function DomainsSection({
             {isCompose && (
               <div>
                 <label className="block text-xs text-slate-400 mb-1">
-                  Service name (from your docker-compose.yml)
+                  Service (from your docker-compose.yml)
                 </label>
-                <input
-                  value={serviceName}
-                  onChange={(e) => setServiceName(e.target.value.trim())}
-                  placeholder="web"
-                  className="w-full bg-slate-800 rounded px-2 py-1 font-mono text-sm"
-                />
+                {services.isLoading ? (
+                  <div className="text-xs text-slate-500 py-1.5">
+                    Detecting services…
+                  </div>
+                ) : services.error ? (
+                  <div>
+                    <input
+                      value={serviceName}
+                      onChange={(e) => setServiceName(e.target.value.trim())}
+                      placeholder="web"
+                      className="w-full bg-slate-800 rounded px-2 py-1 font-mono text-sm"
+                    />
+                    <p className="text-xs text-amber-400 mt-1">
+                      Couldn't auto-detect ({(services.error as Error).message}).
+                      Type the service name manually.
+                    </p>
+                  </div>
+                ) : (
+                  <select
+                    value={serviceName}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setServiceName(next);
+                      const match = services.data?.services.find(
+                        (s) => s.name === next,
+                      );
+                      if (match && match.ports.length > 0) {
+                        setPort(String(match.ports[0]));
+                      }
+                    }}
+                    className="w-full bg-slate-800 rounded px-2 py-1 font-mono text-sm"
+                  >
+                    {(services.data?.services ?? []).map((s) => (
+                      <option key={s.name} value={s.name}>
+                        {s.name}
+                        {s.image ? ` — ${s.image}` : ""}
+                        {s.ports.length > 0 ? ` (:${s.ports.join(", :")})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
             )}
             <div className="grid grid-cols-[1fr_120px] gap-2">

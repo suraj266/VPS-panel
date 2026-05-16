@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { parse as parseYaml } from "yaml";
 import { docker } from "../docker.js";
 
 export function composeProjectName(slug: string): string {
@@ -77,13 +78,24 @@ export async function composeUp(input: ComposeUpInput): Promise<void> {
   const { slug, workDir, composeFile, envFileLines, onLog } = input;
   const projectName = composeProjectName(slug);
 
-  // Write env file (overwrites any existing .env.panel)
-  const envPath = path.join(workDir, ".env.panel");
-  await writeFile(envPath, envFileLines.join("\n") + "\n");
+  // Panel env vars need to be visible to BOTH:
+  //   1. Compose variable substitution (`${VAR}` placeholders in compose.yml)
+  //   2. `env_file: .env` directives inside service blocks
+  //
+  // Easiest way to satisfy both: write panel env to `.env` at the workdir
+  // root. Compose auto-reads .env for variable substitution AND services
+  // referencing `.env` in `env_file:` will find it.
+  //
+  // We overwrite any committed .env in the repo — user has explicitly
+  // chosen to manage env vars via the panel UI, so panel wins.
+  const envBody = envFileLines.join("\n") + "\n";
+  await writeFile(path.join(workDir, ".env"), envBody);
+  // Also keep .env.panel for backward compatibility / debugging visibility.
+  await writeFile(path.join(workDir, ".env.panel"), envBody);
 
   const result = await runCompose(projectName, composeFile, {
     cwd: workDir,
-    args: ["--env-file", ".env.panel", "up", "-d", "--build", "--remove-orphans"],
+    args: ["up", "-d", "--build", "--remove-orphans"],
     onLog,
   });
 
@@ -237,5 +249,79 @@ export async function ensureComposeAvailable(): Promise<void> {
         ? resolve()
         : reject(new Error(`docker compose CLI returned exit code ${code}`)),
     );
+  });
+}
+
+export interface ComposeServiceSpec {
+  name: string;
+  image: string | null;
+  /** Container ports the service `expose:`s or has in `ports:`. */
+  ports: number[];
+}
+
+interface RawComposeFile {
+  services?: Record<string, RawComposeService>;
+}
+
+interface RawComposeService {
+  image?: string;
+  expose?: Array<string | number>;
+  ports?: Array<string | number | { target?: number; published?: number }>;
+}
+
+function parsePortsField(
+  raw: RawComposeService["ports"] | RawComposeService["expose"],
+): number[] {
+  if (!Array.isArray(raw)) return [];
+  const out: number[] = [];
+  for (const entry of raw) {
+    if (typeof entry === "number") {
+      out.push(entry);
+      continue;
+    }
+    if (typeof entry === "string") {
+      // forms: "8080", "8080:80", "127.0.0.1:8080:80", "8080:80/tcp"
+      const trimmed = entry.split("/")[0]!; // strip /tcp suffix
+      const parts = trimmed.split(":");
+      const container = parts[parts.length - 1];
+      const n = Number.parseInt(container ?? "", 10);
+      if (Number.isFinite(n)) out.push(n);
+      continue;
+    }
+    if (typeof entry === "object" && entry !== null) {
+      if (typeof entry.target === "number") out.push(entry.target);
+    }
+  }
+  // dedupe
+  return Array.from(new Set(out));
+}
+
+/**
+ * Parse the compose file at `<workDir>/<composeFile>` and return a list of
+ * services with their image + container-port hints. Used by the panel UI to
+ * auto-populate the service dropdown when binding a domain to a compose app.
+ *
+ * Throws if the file doesn't exist (e.g. the app was never deployed) — caller
+ * should treat that as "not available yet, please deploy first".
+ */
+export async function parseComposeServices(
+  workDir: string,
+  composeFile = "docker-compose.yml",
+): Promise<ComposeServiceSpec[]> {
+  const fullPath = path.join(workDir, composeFile);
+  const text = await readFile(fullPath, "utf8");
+  const doc = parseYaml(text) as RawComposeFile | undefined;
+  if (!doc?.services) return [];
+
+  return Object.entries(doc.services).map(([name, svc]) => {
+    const exposePorts = parsePortsField(svc.expose);
+    const mappedPorts = parsePortsField(svc.ports);
+    return {
+      name,
+      image: typeof svc.image === "string" ? svc.image : null,
+      ports: Array.from(new Set([...exposePorts, ...mappedPorts])).sort(
+        (a, b) => a - b,
+      ),
+    };
   });
 }
