@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useParams, useNavigate, Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Layout } from "../components/layout";
@@ -61,10 +61,56 @@ interface EnvRow {
   isSecret: boolean;
 }
 
+type SectionKey =
+  | "general"
+  | "source"
+  | "env"
+  | "domains"
+  | "webhook"
+  | "deployments"
+  | "danger";
+
+interface SectionEntry {
+  key: SectionKey;
+  label: string;
+  show: (a: AppDetail) => boolean;
+}
+
+const SECTIONS: SectionEntry[] = [
+  { key: "general", label: "General", show: () => true },
+  {
+    key: "source",
+    label: "Source",
+    show: (a) => a.sourceType === "git-repo",
+  },
+  { key: "env", label: "Environment Variables", show: () => true },
+  { key: "domains", label: "Domains", show: () => true },
+  {
+    key: "webhook",
+    label: "Webhook",
+    show: (a) => a.sourceType === "git-repo",
+  },
+  { key: "deployments", label: "Deployments", show: () => true },
+  { key: "danger", label: "Danger Zone", show: () => true },
+];
+
+function isSectionKey(v: string | null): v is SectionKey {
+  return (
+    v === "general" ||
+    v === "source" ||
+    v === "env" ||
+    v === "domains" ||
+    v === "webhook" ||
+    v === "deployments" ||
+    v === "danger"
+  );
+}
+
 export function AppDetailPage() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
   const qc = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["app", id],
@@ -72,38 +118,16 @@ export function AppDetailPage() {
     refetchInterval: 4000,
   });
 
-  const envQuery = useQuery({
-    queryKey: ["app-env", id],
-    queryFn: () => api<EnvVar[]>(`/apps/${id}/env`),
-  });
+  const sectionParam = searchParams.get("section");
+  const activeSection: SectionKey = isSectionKey(sectionParam)
+    ? sectionParam
+    : "general";
 
-  const [envRows, setEnvRows] = useState<EnvRow[]>([]);
-
-  const serverRows = useMemo<EnvRow[]>(
-    () =>
-      (envQuery.data ?? []).map((v) => ({
-        key: v.key,
-        value: v.value ?? "",
-        isSecret: v.isSecret,
-      })),
-    [envQuery.data],
-  );
-
-  useEffect(() => {
-    setEnvRows(serverRows);
-  }, [serverRows]);
-
-  const envDirty = useMemo(() => {
-    if (serverRows.length !== envRows.length) return true;
-    for (let i = 0; i < serverRows.length; i++) {
-      const s = serverRows[i]!;
-      const r = envRows[i]!;
-      if (s.key !== r.key || s.value !== r.value || s.isSecret !== r.isSecret) {
-        return true;
-      }
-    }
-    return false;
-  }, [envRows, serverRows]);
+  function setSection(s: SectionKey) {
+    const next = new URLSearchParams(searchParams);
+    next.set("section", s);
+    setSearchParams(next, { replace: true });
+  }
 
   const deploy = useMutation({
     mutationFn: () => api(`/apps/${id}/deploy`, { method: "POST" }),
@@ -112,30 +136,6 @@ export function AppDetailPage() {
 
   const stop = useMutation({
     mutationFn: () => api(`/apps/${id}/stop`, { method: "POST" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["app", id] }),
-  });
-
-  const saveEnv = useMutation({
-    mutationFn: () =>
-      api(`/apps/${id}/env`, {
-        method: "PUT",
-        body: JSON.stringify({ vars: envRows }),
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["app-env", id] });
-    },
-  });
-
-  const remove = useMutation({
-    mutationFn: () => api(`/apps/${id}`, { method: "DELETE" }),
-    onSuccess: () => nav("/apps"),
-  });
-
-  const redeploy = useMutation({
-    mutationFn: (deploymentId: string) =>
-      api(`/apps/${id}/deployments/${deploymentId}/redeploy`, {
-        method: "POST",
-      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["app", id] }),
   });
 
@@ -156,8 +156,14 @@ export function AppDetailPage() {
     );
   }
 
-  const ports = data.runtimeConfig?.ports ?? [];
-  const lastDeploy = data.deployments[0];
+  const visibleSections = SECTIONS.filter((s) => s.show(data));
+  // Auto-fall back to "general" if the chosen section isn't valid for this
+  // app type (e.g. ?section=source on a prebuilt-image app).
+  const resolvedSection: SectionKey = visibleSections.some(
+    (s) => s.key === activeSection,
+  )
+    ? activeSection
+    : "general";
 
   return (
     <Layout
@@ -195,251 +201,553 @@ export function AppDetailPage() {
           >
             Stop
           </button>
-          <button
-            onClick={() => {
-              if (confirm(`Delete app "${data.slug}" and its container?`)) {
-                remove.mutate();
-              }
-            }}
-            className="bg-red-800/30 hover:bg-red-800/50 border border-red-800/40 text-red-200 rounded-lg px-3.5 py-2 text-sm font-medium"
-          >
-            Delete
-          </button>
         </div>
       }
     >
-      <div className="space-y-6">
-        {deploy.error && (
-          <div className="bg-red-900/50 border border-red-800 rounded p-3 text-sm text-red-200">
-            Deploy failed: {(deploy.error as Error).message}
-          </div>
-        )}
+      {deploy.error && (
+        <div className="bg-red-900/50 border border-red-800 rounded p-3 text-sm text-red-200 mb-4">
+          Deploy failed: {(deploy.error as Error).message}
+        </div>
+      )}
 
-        <GeneralSection app={data} />
-
-        {data.sourceType === "git-repo" && <SourceSection app={data} />}
-
-        <section>
-          <div className="flex items-center justify-between mb-2">
-            <h2 className="text-lg font-semibold">Environment variables</h2>
-            <div className="flex gap-2">
-              <button
-                onClick={() => {
-                  setEnvRows([
-                    ...envRows,
-                    { key: "", value: "", isSecret: false },
-                  ]);
-                                  }}
-                className="text-sm bg-slate-800 hover:bg-slate-700 rounded px-3 py-1"
-              >
-                + Add
-              </button>
-              {envDirty && (
-                <button
-                  onClick={() => saveEnv.mutate()}
-                  disabled={saveEnv.isPending}
-                  className="text-sm bg-indigo-600 hover:bg-indigo-500 rounded px-3 py-1 disabled:opacity-50"
-                >
-                  {saveEnv.isPending ? "Saving…" : "Save"}
-                </button>
-              )}
-            </div>
-          </div>
-          <div className="bg-slate-900 border border-slate-800 rounded">
-            {envRows.length === 0 && (
-              <div className="text-slate-500 text-sm p-4">No env vars set.</div>
-            )}
-            {envRows.map((row, i) => (
-              <div
-                key={i}
-                className="flex items-center gap-2 p-2 border-b border-slate-800 last:border-b-0"
-              >
-                <input
-                  value={row.key}
-                  onChange={(e) => {
-                    const next = [...envRows];
-                    next[i] = { ...next[i]!, key: e.target.value.toUpperCase() };
-                    setEnvRows(next);
-                                      }}
-                  placeholder="KEY"
-                  className="bg-slate-800 rounded px-2 py-1 font-mono text-sm w-48"
-                />
-                <input
-                  value={row.value}
-                  onChange={(e) => {
-                    const next = [...envRows];
-                    next[i] = { ...next[i]!, value: e.target.value };
-                    setEnvRows(next);
-                                      }}
-                  type={row.isSecret ? "password" : "text"}
-                  placeholder="value"
-                  className="flex-1 bg-slate-800 rounded px-2 py-1 font-mono text-sm"
-                />
-                <label className="text-xs text-slate-400 flex items-center gap-1">
-                  <input
-                    type="checkbox"
-                    checked={row.isSecret}
-                    onChange={(e) => {
-                      const next = [...envRows];
-                      next[i] = { ...next[i]!, isSecret: e.target.checked };
-                      setEnvRows(next);
-                                          }}
-                  />
-                  secret
-                </label>
-                <button
-                  onClick={() => {
-                    setEnvRows(envRows.filter((_, j) => j !== i));
-                                      }}
-                  className="text-slate-500 hover:text-red-400 px-2"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-          </div>
-          {envDirty && (
-            <div className="text-xs text-amber-400 mt-1">
-              Unsaved changes. Click Save, then Deploy to apply.
-            </div>
-          )}
-        </section>
-
-        <DomainsSection
-          appId={data.id}
-          domains={data.domains}
-          isCompose={
-            data.sourceType === "git-repo" &&
-            (data.buildMode ?? null) === "compose"
-          }
-        />
-
-        {data.sourceType === "git-repo" && (
-          <WebhookSection
-            appId={data.id}
-            webhookSecret={data.webhookSecret ?? null}
-            branch={data.branch ?? "main"}
-          />
-        )}
-
-        <section>
-          <h2 className="text-lg font-semibold mb-2">Deployment history</h2>
-          <div className="bg-slate-900 border border-slate-800 rounded">
-            {data.deployments.length === 0 && (
-              <div className="text-slate-500 text-sm p-4">
-                No deployments yet.
-              </div>
-            )}
-            {data.deployments.map((d, idx) => {
-              const isLatest = idx === 0;
-              const isCompose = data.buildMode === "compose";
-              const canRedeploy =
-                d.status === "succeeded" &&
-                d.imageTag &&
-                d.imageTag !== "(pending)" &&
-                !isCompose;
+      <div className="flex gap-6">
+        <aside className="w-56 shrink-0">
+          <nav className="space-y-0.5 sticky top-4">
+            {visibleSections.map((s) => {
+              const active = s.key === resolvedSection;
               return (
-                <details
-                  key={d.id}
-                  className="border-b border-slate-800 last:border-b-0"
+                <button
+                  key={s.key}
+                  onClick={() => setSection(s.key)}
+                  className={
+                    "w-full text-left px-3 py-2 rounded-lg text-sm transition-colors " +
+                    (active
+                      ? "bg-indigo-600/20 text-indigo-200 border border-indigo-600/40"
+                      : s.key === "danger"
+                        ? "text-red-300/70 hover:bg-red-900/20 hover:text-red-200 border border-transparent"
+                        : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-100 border border-transparent")
+                  }
                 >
-                  <summary className="p-3 cursor-pointer flex items-center justify-between gap-3">
-                    <span className="text-sm flex items-center gap-2 min-w-0 flex-1">
-                      <span
-                        className={
-                          d.status === "succeeded"
-                            ? "text-green-400"
-                            : d.status === "failed"
-                              ? "text-red-400"
-                              : "text-amber-400"
-                        }
-                      >
-                        {d.status}
-                      </span>
-                      {d.trigger && d.trigger !== "manual" && (
-                        <span
-                          className={
-                            d.trigger === "webhook"
-                              ? "text-xs bg-blue-900/40 text-blue-300 px-1.5 py-0.5 rounded"
-                              : "text-xs bg-purple-900/40 text-purple-300 px-1.5 py-0.5 rounded"
-                          }
-                        >
-                          {d.trigger}
-                        </span>
-                      )}
-                      {isLatest && (
-                        <span className="text-xs bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded">
-                          current
-                        </span>
-                      )}
-                      <span className="font-mono text-slate-400 text-xs truncate">
-                        {d.imageTag}
-                      </span>
-                      {d.commitMessage && (
-                        <span className="text-xs text-slate-500 truncate">
-                          — {d.commitMessage}
-                        </span>
-                      )}
-                    </span>
-                    <span className="flex items-center gap-2 shrink-0">
-                      <span className="text-xs text-slate-500">
-                        {new Date(d.startedAt).toLocaleString()}
-                      </span>
-                      {canRedeploy && !isLatest && (
-                        <button
-                          onClick={(e) => {
-                            e.preventDefault();
-                            if (
-                              confirm(
-                                `Roll back to image "${d.imageTag}"? Current container will be stopped and replaced.`,
-                              )
-                            ) {
-                              redeploy.mutate(d.id);
-                            }
-                          }}
-                          disabled={redeploy.isPending}
-                          className="text-xs bg-amber-800 hover:bg-amber-700 rounded px-2 py-0.5 disabled:opacity-50"
-                          title="Roll back to this image"
-                        >
-                          Redeploy
-                        </button>
-                      )}
-                      {isCompose && d.status === "succeeded" && (
-                        <span
-                          className="text-xs text-slate-600"
-                          title="Compose apps can't be rolled back from history — push a fix commit or change the watched branch."
-                        >
-                          —
-                        </span>
-                      )}
-                    </span>
-                  </summary>
-                  {d.log && (
-                    <pre className="text-xs bg-slate-950 p-3 overflow-x-auto whitespace-pre-wrap text-slate-300">
-                      {d.log}
-                    </pre>
-                  )}
-                </details>
+                  {s.label}
+                </button>
               );
             })}
-          </div>
-        </section>
+          </nav>
+        </aside>
 
-        {lastDeploy?.status === "succeeded" && ports[0] && (
-          <div className="text-sm text-slate-400">
-            App should be reachable at{" "}
-            <a
-              href={`http://localhost:${ports[0].host}`}
-              target="_blank"
-              rel="noreferrer"
-              className="text-indigo-400 hover:underline"
-            >
-              http://localhost:{ports[0].host}
-            </a>
-          </div>
-        )}
+        <div className="flex-1 min-w-0 space-y-6">
+          {resolvedSection === "general" && <GeneralSection app={data} />}
+          {resolvedSection === "source" && <SourceSection app={data} />}
+          {resolvedSection === "env" && <EnvVarsSection appId={data.id} />}
+          {resolvedSection === "domains" && (
+            <DomainsSection
+              appId={data.id}
+              domains={data.domains}
+              isCompose={
+                data.sourceType === "git-repo" &&
+                (data.buildMode ?? null) === "compose"
+              }
+            />
+          )}
+          {resolvedSection === "webhook" && (
+            <WebhookSection
+              appId={data.id}
+              webhookSecret={data.webhookSecret ?? null}
+              branch={data.branch ?? "main"}
+            />
+          )}
+          {resolvedSection === "deployments" && (
+            <DeploymentsSection
+              appId={data.id}
+              deployments={data.deployments}
+              buildMode={data.buildMode}
+              ports={data.runtimeConfig?.ports ?? []}
+            />
+          )}
+          {resolvedSection === "danger" && (
+            <DangerZoneSection
+              appId={data.id}
+              slug={data.slug}
+              onDeleted={() => nav("/apps")}
+            />
+          )}
+        </div>
       </div>
     </Layout>
+  );
+}
+
+// ============================================================================
+// Environment variables — table view + developer (textarea) view for bulk paste.
+// ============================================================================
+
+function parseEnvText(text: string, existing: EnvRow[]): EnvRow[] {
+  const existingMap = new Map(existing.map((r) => [r.key, r]));
+  const rows: EnvRow[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim().toUpperCase();
+    let value = line.slice(eq + 1);
+    // Strip surrounding single/double quotes.
+    if (value.length >= 2) {
+      const first = value[0];
+      const last = value[value.length - 1];
+      if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+        value = value.slice(1, -1);
+      }
+    }
+    // Strip inline " #comment" suffix (with a leading space — values can
+    // legitimately contain "#"). Matches what dotenv-style parsers do.
+    const hashIdx = value.indexOf(" #");
+    if (hashIdx > -1) value = value.slice(0, hashIdx).trimEnd();
+    rows.push({
+      key,
+      value,
+      isSecret: existingMap.get(key)?.isSecret ?? false,
+    });
+  }
+  return rows;
+}
+
+function rowsToText(rows: EnvRow[]): string {
+  return rows
+    .filter((r) => r.key)
+    .map((r) => `${r.key}=${r.value}`)
+    .join("\n");
+}
+
+function EnvVarsSection({ appId }: { appId: string }) {
+  const qc = useQueryClient();
+
+  const envQuery = useQuery({
+    queryKey: ["app-env", appId],
+    queryFn: () => api<EnvVar[]>(`/apps/${appId}/env`),
+  });
+
+  const [envRows, setEnvRows] = useState<EnvRow[]>([]);
+  const [devView, setDevView] = useState(false);
+  const [devText, setDevText] = useState("");
+
+  const serverRows = useMemo<EnvRow[]>(
+    () =>
+      (envQuery.data ?? []).map((v) => ({
+        key: v.key,
+        value: v.value ?? "",
+        isSecret: v.isSecret,
+      })),
+    [envQuery.data],
+  );
+
+  // Reset local state whenever server data changes.
+  useEffect(() => {
+    setEnvRows(serverRows);
+    setDevText(rowsToText(serverRows));
+  }, [serverRows]);
+
+  // When user types in developer view, parse continuously into envRows so
+  // the dirty-check + Save flow stays the same.
+  function updateDevText(next: string) {
+    setDevText(next);
+    setEnvRows(parseEnvText(next, envRows));
+  }
+
+  // When switching modes, sync the other view from current data.
+  function switchView(toDev: boolean) {
+    if (toDev) {
+      setDevText(rowsToText(envRows));
+    } else {
+      setEnvRows(parseEnvText(devText, envRows));
+    }
+    setDevView(toDev);
+  }
+
+  const envDirty = useMemo(() => {
+    if (serverRows.length !== envRows.length) return true;
+    for (let i = 0; i < serverRows.length; i++) {
+      const s = serverRows[i]!;
+      const r = envRows[i]!;
+      if (s.key !== r.key || s.value !== r.value || s.isSecret !== r.isSecret) {
+        return true;
+      }
+    }
+    return false;
+  }, [envRows, serverRows]);
+
+  const saveEnv = useMutation({
+    mutationFn: () =>
+      api(`/apps/${appId}/env`, {
+        method: "PUT",
+        body: JSON.stringify({ vars: envRows }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["app-env", appId] }),
+  });
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h2 className="text-lg font-semibold">Environment variables</h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Secrets are AES-256-GCM encrypted at rest. Click <b>Save</b> then
+            redeploy for changes to take effect.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <div className="inline-flex rounded-lg overflow-hidden border border-slate-700 text-xs">
+            <button
+              onClick={() => switchView(false)}
+              className={
+                "px-2.5 py-1 " +
+                (!devView
+                  ? "bg-slate-700 text-slate-100"
+                  : "bg-slate-900 text-slate-400 hover:text-slate-200")
+              }
+            >
+              Normal
+            </button>
+            <button
+              onClick={() => switchView(true)}
+              className={
+                "px-2.5 py-1 " +
+                (devView
+                  ? "bg-slate-700 text-slate-100"
+                  : "bg-slate-900 text-slate-400 hover:text-slate-200")
+              }
+              title="Paste a .env file all at once"
+            >
+              Developer
+            </button>
+          </div>
+          {!devView && (
+            <button
+              onClick={() =>
+                setEnvRows([
+                  ...envRows,
+                  { key: "", value: "", isSecret: false },
+                ])
+              }
+              className="text-sm bg-slate-800 hover:bg-slate-700 rounded px-3 py-1"
+            >
+              + Add
+            </button>
+          )}
+          {envDirty && (
+            <button
+              onClick={() => saveEnv.mutate()}
+              disabled={saveEnv.isPending}
+              className="text-sm bg-indigo-600 hover:bg-indigo-500 rounded px-3 py-1 disabled:opacity-50"
+            >
+              {saveEnv.isPending ? "Saving…" : "Save"}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {devView ? (
+        <div>
+          <div className="bg-indigo-950/30 border border-indigo-900/40 rounded-lg p-3 mb-2 text-xs text-indigo-200">
+            Paste a <code>.env</code>-style block. One{" "}
+            <code>KEY=value</code> per line. Lines starting with{" "}
+            <code>#</code> and inline <code> #comment</code> suffixes are
+            stripped. Surrounding quotes around values are removed.
+          </div>
+          <textarea
+            value={devText}
+            onChange={(e) => updateDevText(e.target.value)}
+            spellCheck={false}
+            rows={Math.max(8, Math.min(devText.split("\n").length + 1, 30))}
+            placeholder={"DATABASE_URL=postgres://...\nSTRIPE_KEY=sk_test_...\nNODE_ENV=production"}
+            className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-xs"
+          />
+          <p className="text-xs text-slate-500 mt-1">
+            Switch back to <b>Normal</b> view to flag specific keys as
+            secrets (encrypted at rest, hidden in UI).
+          </p>
+        </div>
+      ) : (
+        <div className="bg-slate-900 border border-slate-800 rounded">
+          {envRows.length === 0 && (
+            <div className="text-slate-500 text-sm p-4">
+              No env vars set. Click <b>+ Add</b> or switch to{" "}
+              <b>Developer</b> view to paste a .env file.
+            </div>
+          )}
+          {envRows.map((row, i) => (
+            <div
+              key={i}
+              className="flex items-center gap-2 p-2 border-b border-slate-800 last:border-b-0"
+            >
+              <input
+                value={row.key}
+                onChange={(e) => {
+                  const next = [...envRows];
+                  next[i] = {
+                    ...next[i]!,
+                    key: e.target.value.toUpperCase(),
+                  };
+                  setEnvRows(next);
+                }}
+                placeholder="KEY"
+                className="bg-slate-800 rounded px-2 py-1 font-mono text-sm w-48"
+              />
+              <input
+                value={row.value}
+                onChange={(e) => {
+                  const next = [...envRows];
+                  next[i] = { ...next[i]!, value: e.target.value };
+                  setEnvRows(next);
+                }}
+                type={row.isSecret ? "password" : "text"}
+                placeholder="value"
+                className="flex-1 bg-slate-800 rounded px-2 py-1 font-mono text-sm"
+              />
+              <label className="text-xs text-slate-400 flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={row.isSecret}
+                  onChange={(e) => {
+                    const next = [...envRows];
+                    next[i] = { ...next[i]!, isSecret: e.target.checked };
+                    setEnvRows(next);
+                  }}
+                />
+                secret
+              </label>
+              <button
+                onClick={() => setEnvRows(envRows.filter((_, j) => j !== i))}
+                className="text-slate-500 hover:text-red-400 px-2"
+                aria-label="Remove row"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {envDirty && (
+        <div className="text-xs text-amber-400 mt-2">
+          Unsaved changes. Click <b>Save</b>, then redeploy to apply.
+        </div>
+      )}
+      {saveEnv.error && (
+        <div className="text-xs text-red-400 mt-2">
+          {(saveEnv.error as Error).message}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ============================================================================
+// Deployments — extracted from the inline render so it lives in its own tab.
+// ============================================================================
+
+function DeploymentsSection({
+  appId,
+  deployments,
+  buildMode,
+  ports,
+}: {
+  appId: string;
+  deployments: Deployment[];
+  buildMode: AppDetail["buildMode"];
+  ports: Array<{ host: number; container: number; proto?: string }>;
+}) {
+  const qc = useQueryClient();
+  const redeploy = useMutation({
+    mutationFn: (deploymentId: string) =>
+      api(`/apps/${appId}/deployments/${deploymentId}/redeploy`, {
+        method: "POST",
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["app", appId] }),
+  });
+
+  const isCompose = buildMode === "compose";
+  const latest = deployments[0];
+
+  return (
+    <section>
+      <h2 className="text-lg font-semibold mb-2">Deployment history</h2>
+      <div className="bg-slate-900 border border-slate-800 rounded">
+        {deployments.length === 0 && (
+          <div className="text-slate-500 text-sm p-4">
+            No deployments yet.
+          </div>
+        )}
+        {deployments.map((d, idx) => {
+          const isLatest = idx === 0;
+          const canRedeploy =
+            d.status === "succeeded" &&
+            d.imageTag &&
+            d.imageTag !== "(pending)" &&
+            !isCompose;
+          return (
+            <details
+              key={d.id}
+              className="border-b border-slate-800 last:border-b-0"
+            >
+              <summary className="p-3 cursor-pointer flex items-center justify-between gap-3">
+                <span className="text-sm flex items-center gap-2 min-w-0 flex-1">
+                  <span
+                    className={
+                      d.status === "succeeded"
+                        ? "text-green-400"
+                        : d.status === "failed"
+                          ? "text-red-400"
+                          : "text-amber-400"
+                    }
+                  >
+                    {d.status}
+                  </span>
+                  {d.trigger && d.trigger !== "manual" && (
+                    <span
+                      className={
+                        d.trigger === "webhook"
+                          ? "text-xs bg-blue-900/40 text-blue-300 px-1.5 py-0.5 rounded"
+                          : "text-xs bg-purple-900/40 text-purple-300 px-1.5 py-0.5 rounded"
+                      }
+                    >
+                      {d.trigger}
+                    </span>
+                  )}
+                  {isLatest && (
+                    <span className="text-xs bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded">
+                      current
+                    </span>
+                  )}
+                  <span className="font-mono text-slate-400 text-xs truncate">
+                    {d.imageTag}
+                  </span>
+                  {d.commitMessage && (
+                    <span className="text-xs text-slate-500 truncate">
+                      — {d.commitMessage}
+                    </span>
+                  )}
+                </span>
+                <span className="flex items-center gap-2 shrink-0">
+                  <span className="text-xs text-slate-500">
+                    {new Date(d.startedAt).toLocaleString()}
+                  </span>
+                  {canRedeploy && !isLatest && (
+                    <button
+                      onClick={(e) => {
+                        e.preventDefault();
+                        if (
+                          confirm(
+                            `Roll back to image "${d.imageTag}"? Current container will be stopped and replaced.`,
+                          )
+                        ) {
+                          redeploy.mutate(d.id);
+                        }
+                      }}
+                      disabled={redeploy.isPending}
+                      className="text-xs bg-amber-800 hover:bg-amber-700 rounded px-2 py-0.5 disabled:opacity-50"
+                      title="Roll back to this image"
+                    >
+                      Redeploy
+                    </button>
+                  )}
+                  {isCompose && d.status === "succeeded" && (
+                    <span
+                      className="text-xs text-slate-600"
+                      title="Compose apps can't be rolled back from history — push a fix commit or change the watched branch."
+                    >
+                      —
+                    </span>
+                  )}
+                </span>
+              </summary>
+              {d.log && (
+                <pre className="text-xs bg-slate-950 p-3 overflow-x-auto whitespace-pre-wrap text-slate-300">
+                  {d.log}
+                </pre>
+              )}
+            </details>
+          );
+        })}
+      </div>
+
+      {latest?.status === "succeeded" && ports[0] && (
+        <div className="text-sm text-slate-400 mt-3">
+          App should be reachable at{" "}
+          <a
+            href={`http://localhost:${ports[0].host}`}
+            target="_blank"
+            rel="noreferrer"
+            className="text-indigo-400 hover:underline"
+          >
+            http://localhost:{ports[0].host}
+          </a>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ============================================================================
+// Danger zone — destructive operations live behind a confirmation here, not
+// in the top bar, so they can't be triggered by accident.
+// ============================================================================
+
+function DangerZoneSection({
+  appId,
+  slug,
+  onDeleted,
+}: {
+  appId: string;
+  slug: string;
+  onDeleted: () => void;
+}) {
+  const [confirmText, setConfirmText] = useState("");
+  const remove = useMutation({
+    mutationFn: () => api(`/apps/${appId}`, { method: "DELETE" }),
+    onSuccess: onDeleted,
+  });
+
+  const canDelete = confirmText === slug;
+
+  return (
+    <section>
+      <h2 className="text-lg font-semibold mb-2 text-red-300">Danger zone</h2>
+      <div className="bg-red-950/20 border border-red-900/50 rounded p-4 space-y-3">
+        <div>
+          <div className="font-medium text-red-200">Delete this app</div>
+          <p className="text-xs text-slate-400 mt-1">
+            Stops and removes the container, deletes nginx site configs for
+            bound domains, removes env vars, and erases deployment history.
+            <b className="text-red-300"> This cannot be undone.</b>
+          </p>
+        </div>
+        <div>
+          <label className="block text-xs text-slate-400 mb-1">
+            Type <code className="bg-slate-900 px-1 rounded">{slug}</code> to
+            confirm
+          </label>
+          <input
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+            placeholder={slug}
+            className="w-full max-w-md bg-slate-900 border border-slate-800 rounded px-2 py-1 font-mono text-sm"
+          />
+        </div>
+        {remove.error && (
+          <div className="text-red-400 text-xs">
+            {(remove.error as Error).message}
+          </div>
+        )}
+        <button
+          onClick={() => remove.mutate()}
+          disabled={!canDelete || remove.isPending}
+          className="bg-red-700 hover:bg-red-600 disabled:bg-red-900 disabled:text-red-400 disabled:cursor-not-allowed rounded-lg px-4 py-2 text-sm font-medium"
+        >
+          {remove.isPending ? "Deleting…" : "Delete app"}
+        </button>
+      </div>
+    </section>
   );
 }
 
