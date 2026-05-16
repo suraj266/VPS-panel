@@ -1,3 +1,4 @@
+import { Writable } from "node:stream";
 import { docker, pullImage } from "../docker.js";
 
 const CERTBOT_IMAGE = "certbot/certbot:latest";
@@ -51,21 +52,18 @@ async function runCertbot(args: string[], onLog: (line: string) => void): Promis
   await pullImage(CERTBOT_IMAGE);
   const volumes = await findNginxVolumes();
 
-  const out: Buffer[] = [];
-
-  // dockerode.run() creates + starts + waits for exit. We pipe a sink that
-  // both buffers and forwards lines.
-  const sink = {
-    write: (chunk: Buffer) => {
-      out.push(chunk);
+  // dockerode.run() pipes container output into the provided stream AND
+  // attaches event listeners (.on('close')) on it, so the sink must be a real
+  // Node Writable, not a duck-typed object.
+  const sink = new Writable({
+    write(chunk: Buffer, _enc, cb) {
       const text = chunk.toString("utf8");
       for (const line of text.split(/\r?\n/)) {
         if (line.trim()) onLog(line);
       }
-      return true;
+      cb();
     },
-    end: () => {},
-  } as unknown as NodeJS.WritableStream;
+  });
 
   const [result] = (await docker.run(CERTBOT_IMAGE, args, sink, {
     HostConfig: {
