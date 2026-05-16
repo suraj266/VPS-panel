@@ -43,6 +43,8 @@ interface AppDetail {
   branch: string | null;
   dockerfilePath: string | null;
   composePath: string | null;
+  githubRepoFullName: string | null;
+  githubInstallationId: string | null;
   webhookSecret: string | null;
   runtimeConfig: {
     ports?: Array<{ host: number; container: number; proto?: string }>;
@@ -207,33 +209,15 @@ export function AppDetailPage() {
       }
     >
       <div className="space-y-6">
-        {data.description && (
-          <p className="text-sm text-slate-400">{data.description}</p>
-        )}
-
         {deploy.error && (
           <div className="bg-red-900/50 border border-red-800 rounded p-3 text-sm text-red-200">
             Deploy failed: {(deploy.error as Error).message}
           </div>
         )}
 
-        <section>
-          <h2 className="text-lg font-semibold mb-2">Runtime</h2>
-          <div className="bg-slate-900 border border-slate-800 rounded p-4 text-sm">
-            <div className="grid grid-cols-2 gap-2">
-              <span className="text-slate-400">Restart policy</span>
-              <span>{data.runtimeConfig?.restartPolicy ?? "unless-stopped"}</span>
-              <span className="text-slate-400">Ports</span>
-              <span className="font-mono">
-                {ports.length
-                  ? ports.map((p) => `${p.host}→${p.container}`).join(", ")
-                  : "—"}
-              </span>
-              <span className="text-slate-400">Container name</span>
-              <span className="font-mono">panel_{data.slug}</span>
-            </div>
-          </div>
-        </section>
+        <GeneralSection app={data} />
+
+        {data.sourceType === "git-repo" && <SourceSection app={data} />}
 
         <section>
           <div className="flex items-center justify-between mb-2">
@@ -1000,6 +984,354 @@ function WebhookSection({
             token" field, enable "Push events".
           </p>
         </details>
+      </div>
+    </section>
+  );
+}
+
+// ============================================================================
+// General — editable description + source-type badge + container name.
+// ============================================================================
+
+function GeneralSection({ app }: { app: AppDetail }) {
+  const qc = useQueryClient();
+  const [description, setDescription] = useState(app.description ?? "");
+  const [editing, setEditing] = useState(false);
+
+  // Keep local state in sync if the server data changes while we're not editing.
+  useEffect(() => {
+    if (!editing) setDescription(app.description ?? "");
+  }, [app.description, editing]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      api(`/apps/${app.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ description }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["app", app.id] });
+      setEditing(false);
+    },
+  });
+
+  const ports = app.runtimeConfig?.ports ?? [];
+
+  return (
+    <section>
+      <h2 className="text-lg font-semibold mb-2">General</h2>
+      <div className="bg-slate-900 border border-slate-800 rounded p-4 text-sm space-y-3">
+        <div className="grid grid-cols-[160px_1fr] gap-y-2 gap-x-3 items-center">
+          <span className="text-slate-400">Slug</span>
+          <span className="font-mono">{app.slug}</span>
+
+          <span className="text-slate-400">Project</span>
+          <span className="font-mono">
+            {app.project ? app.project.name : "(unscoped)"}
+          </span>
+
+          <span className="text-slate-400">Source</span>
+          <span>
+            {app.sourceType === "git-repo" ? (
+              <span className="inline-flex items-center gap-1 text-xs bg-indigo-900/40 text-indigo-300 px-2 py-0.5 rounded">
+                git · {app.buildMode ?? "dockerfile"}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-xs bg-slate-800 text-slate-300 px-2 py-0.5 rounded">
+                prebuilt image
+              </span>
+            )}
+          </span>
+
+          <span className="text-slate-400">Container</span>
+          <span className="font-mono">panel_{app.slug}</span>
+
+          <span className="text-slate-400">Restart policy</span>
+          <span className="font-mono">
+            {app.runtimeConfig?.restartPolicy ?? "unless-stopped"}
+          </span>
+
+          <span className="text-slate-400">Ports</span>
+          <span className="font-mono">
+            {ports.length
+              ? ports.map((p) => `${p.host}→${p.container}`).join(", ")
+              : "—"}
+          </span>
+        </div>
+
+        <div className="border-t border-slate-800 pt-3">
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-xs uppercase tracking-wider text-slate-500">
+              Description
+            </label>
+            {!editing && (
+              <button
+                onClick={() => setEditing(true)}
+                className="text-xs text-indigo-400 hover:text-indigo-300"
+              >
+                Edit
+              </button>
+            )}
+          </div>
+          {editing ? (
+            <div className="space-y-2">
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                rows={2}
+                placeholder="What this app does…"
+                className="w-full bg-slate-800 rounded px-2 py-1 text-sm"
+              />
+              {save.error && (
+                <div className="text-red-400 text-xs">
+                  {(save.error as Error).message}
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => {
+                    setDescription(app.description ?? "");
+                    setEditing(false);
+                  }}
+                  className="text-xs text-slate-400 hover:text-white px-2 py-1"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => save.mutate()}
+                  disabled={save.isPending}
+                  className="text-xs bg-indigo-600 hover:bg-indigo-500 rounded px-3 py-1 disabled:opacity-50"
+                >
+                  {save.isPending ? "Saving…" : "Save"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="text-sm text-slate-300">
+              {app.description || (
+                <span className="text-slate-600">— no description —</span>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ============================================================================
+// Source — editable git URL / branch / build mode / paths. Saving marks the
+// config as "pending" — the next Build & Deploy picks them up.
+// ============================================================================
+
+function SourceSection({ app }: { app: AppDetail }) {
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [repoUrl, setRepoUrl] = useState(app.repoUrl ?? "");
+  const [branch, setBranch] = useState(app.branch ?? "main");
+  const [buildMode, setBuildMode] = useState(app.buildMode ?? "dockerfile");
+  const [dockerfilePath, setDockerfilePath] = useState(
+    app.dockerfilePath ?? "Dockerfile",
+  );
+  const [composePath, setComposePath] = useState(
+    app.composePath ?? "docker-compose.yml",
+  );
+
+  // Reset form when server data changes (we're not actively editing).
+  useEffect(() => {
+    if (editing) return;
+    setRepoUrl(app.repoUrl ?? "");
+    setBranch(app.branch ?? "main");
+    setBuildMode(app.buildMode ?? "dockerfile");
+    setDockerfilePath(app.dockerfilePath ?? "Dockerfile");
+    setComposePath(app.composePath ?? "docker-compose.yml");
+  }, [
+    app.repoUrl,
+    app.branch,
+    app.buildMode,
+    app.dockerfilePath,
+    app.composePath,
+    editing,
+  ]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      api(`/apps/${app.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          git: {
+            repoUrl: repoUrl || undefined,
+            branch,
+            buildMode,
+            dockerfilePath,
+            composePath,
+          },
+        }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["app", app.id] });
+      setEditing(false);
+    },
+  });
+
+  const dirty =
+    editing &&
+    ((app.repoUrl ?? "") !== repoUrl ||
+      (app.branch ?? "main") !== branch ||
+      (app.buildMode ?? "dockerfile") !== buildMode ||
+      (app.dockerfilePath ?? "Dockerfile") !== dockerfilePath ||
+      (app.composePath ?? "docker-compose.yml") !== composePath);
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-lg font-semibold">Source</h2>
+        {!editing && (
+          <button
+            onClick={() => setEditing(true)}
+            className="text-xs text-indigo-400 hover:text-indigo-300"
+          >
+            Edit
+          </button>
+        )}
+      </div>
+      <div className="bg-slate-900 border border-slate-800 rounded p-4 text-sm">
+        {!editing ? (
+          <div className="grid grid-cols-[160px_1fr] gap-y-2 gap-x-3">
+            <span className="text-slate-400">Repo</span>
+            <span className="font-mono text-xs break-all">
+              {app.repoUrl ?? app.githubRepoFullName ?? "—"}
+            </span>
+
+            <span className="text-slate-400">Branch</span>
+            <span className="font-mono">{app.branch ?? "main"}</span>
+
+            <span className="text-slate-400">Build mode</span>
+            <span className="font-mono">{app.buildMode ?? "dockerfile"}</span>
+
+            {app.buildMode === "dockerfile" && (
+              <>
+                <span className="text-slate-400">Dockerfile path</span>
+                <span className="font-mono">
+                  {app.dockerfilePath ?? "Dockerfile"}
+                </span>
+              </>
+            )}
+            {app.buildMode === "compose" && (
+              <>
+                <span className="text-slate-400">Compose file</span>
+                <span className="font-mono">
+                  {app.composePath ?? "docker-compose.yml"}
+                </span>
+              </>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs uppercase tracking-wider text-slate-500 mb-1">
+                Repo URL
+              </label>
+              <input
+                value={repoUrl}
+                onChange={(e) => setRepoUrl(e.target.value)}
+                placeholder="https://github.com/user/repo.git"
+                className="w-full bg-slate-800 rounded px-2 py-1 font-mono text-sm"
+              />
+              {app.githubRepoFullName && (
+                <p className="text-xs text-slate-500 mt-1">
+                  This app is connected via GitHub App ({app.githubRepoFullName}).
+                  Changing the URL here switches to PAT mode.
+                </p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-slate-500 mb-1">
+                  Branch
+                </label>
+                <input
+                  value={branch}
+                  onChange={(e) => setBranch(e.target.value)}
+                  className="w-full bg-slate-800 rounded px-2 py-1 font-mono text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-slate-500 mb-1">
+                  Build mode
+                </label>
+                <select
+                  value={buildMode}
+                  onChange={(e) =>
+                    setBuildMode(
+                      e.target.value as "dockerfile" | "static" | "compose",
+                    )
+                  }
+                  className="w-full bg-slate-800 rounded px-2 py-1 text-sm"
+                >
+                  <option value="dockerfile">dockerfile</option>
+                  <option value="static">static</option>
+                  <option value="compose">compose</option>
+                </select>
+              </div>
+            </div>
+
+            {buildMode === "dockerfile" && (
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-slate-500 mb-1">
+                  Dockerfile path
+                </label>
+                <input
+                  value={dockerfilePath}
+                  onChange={(e) => setDockerfilePath(e.target.value)}
+                  className="w-full bg-slate-800 rounded px-2 py-1 font-mono text-sm"
+                />
+              </div>
+            )}
+            {buildMode === "compose" && (
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-slate-500 mb-1">
+                  Compose file
+                </label>
+                <input
+                  value={composePath}
+                  onChange={(e) => setComposePath(e.target.value)}
+                  className="w-full bg-slate-800 rounded px-2 py-1 font-mono text-sm"
+                />
+              </div>
+            )}
+
+            {save.error && (
+              <div className="text-red-400 text-xs">
+                {(save.error as Error).message}
+              </div>
+            )}
+
+            {dirty && (
+              <div className="text-xs text-amber-400 bg-amber-950/40 border border-amber-900/50 rounded px-2 py-1.5">
+                Changes pending — click <b>Save</b> then <b>Build & Deploy</b>{" "}
+                in the top bar to apply.
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setEditing(false)}
+                className="text-xs text-slate-400 hover:text-white px-2 py-1"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => save.mutate()}
+                disabled={save.isPending || !dirty}
+                className="text-xs bg-indigo-600 hover:bg-indigo-500 rounded px-3 py-1 disabled:opacity-50"
+              >
+                {save.isPending ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );
