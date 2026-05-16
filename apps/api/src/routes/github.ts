@@ -80,10 +80,15 @@ export const githubRoutes: FastifyPluginAsync = async (app) => {
   // it on GitHub.
   app.post("/github-apps/manifest", async (req, reply) => {
     requireAuth(req);
-    const { origin, state } = z
+    const { origin } = z
       .object({
         origin: z.string().url(),
-        state: z.string().min(8),
+        // `state` is still accepted from the client (it's appended to the
+        // GitHub form action URL by the frontend), but we do NOT bake it
+        // into redirect_url — GitHub adds `state` (and `code`) to the
+        // redirect itself, and rejects manifests whose redirect_url has
+        // arbitrary query strings ("redirect_url must be a valid URL").
+        state: z.string().min(8).optional(),
       })
       .parse(req.body);
 
@@ -94,8 +99,10 @@ export const githubRoutes: FastifyPluginAsync = async (app) => {
         url: `${origin}/api/github/webhook`,
         active: true,
       },
-      redirect_url: `${origin}/api/github-apps/callback?state=${encodeURIComponent(state)}`,
-      callback_urls: [`${origin}/api/github-apps/install-callback`],
+      redirect_url: `${origin}/api/github-apps/callback`,
+      // GitHub requires callback_urls but we don't use OAuth user-auth flow;
+      // point at the same callback route as a placeholder.
+      callback_urls: [`${origin}/api/github-apps/callback`],
       public: false,
       default_permissions: {
         contents: "read",
