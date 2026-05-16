@@ -54,7 +54,17 @@ export async function buildServer() {
     return reply.code(status).send({ error: err.message });
   });
 
-  await app.register(helmet, { contentSecurityPolicy: false });
+  // HSTS is intentionally disabled. Helmet's default sends
+  // `Strict-Transport-Security: max-age=15552000; includeSubDomains` which the
+  // browser caches for 6 months and refuses to ever load the panel over plain
+  // HTTP again — catastrophic if the user is mid-SSL-setup and the cert is
+  // missing or untrusted (staging cert / expired / wrong domain). The panel is
+  // self-hosted; users explicitly opt into HTTPS by issuing a cert, and nginx
+  // already handles HTTP→HTTPS redirect when sslEnabled=true.
+  await app.register(helmet, {
+    contentSecurityPolicy: false,
+    hsts: false,
+  });
   if (env.NODE_ENV !== "production") {
     // In production the API and web are served from the same origin, so CORS
     // is unnecessary. In dev, Vite proxies through but cookies still need
