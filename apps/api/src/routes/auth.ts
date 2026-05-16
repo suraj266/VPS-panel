@@ -69,12 +69,20 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       data: { id: sid, userId: user.id, expiresAt },
     });
 
+    // `secure: true` cookies are rejected by browsers over plain HTTP. Base the
+    // flag on whether the operator-configured canonical URL is https, NOT on
+    // NODE_ENV alone — a production deploy reachable only over HTTP (e.g.
+    // before the operator has set up a domain + Let's Encrypt) must use
+    // non-secure cookies, otherwise login bounces back to the form.
+    const panelOrigin = process.env.PANEL_ORIGIN ?? "";
+    const useSecureCookies = panelOrigin.startsWith("https://");
+
     reply.setCookie(SESSION_COOKIE, sid, {
       httpOnly: true,
       sameSite: "lax",
       path: "/",
       expires: expiresAt,
-      secure: process.env.NODE_ENV === "production",
+      secure: useSecureCookies,
     });
 
     await recordAudit(req, {
