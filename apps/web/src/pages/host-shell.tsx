@@ -14,21 +14,27 @@ const HOST_CONTAINER = "panel_host";
 // container that has the host mounted at /host.
 const SHELLS: Array<{ value: string; label: string; description: string }> = [
   {
+    value: "host-root",
+    label: "VPS root",
+    description:
+      "Real host root shell (chroot /host /bin/bash). Files at /, not /host.",
+  },
+  {
     value: "/bin/bash",
     label: "container bash",
-    description: "bash inside panel_host. Host fs is at /host.",
+    description: "bash inside panel_host sidecar. Host fs mounted at /host.",
   },
   {
     value: "/bin/sh",
     label: "container sh",
-    description: "POSIX sh inside panel_host.",
+    description: "POSIX sh inside panel_host sidecar.",
   },
 ];
 
 export function HostShellPage() {
   const hostRef = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<ConnState>("connecting");
-  const [shell, setShell] = useState<string>("/bin/bash");
+  const [shell, setShell] = useState<string>("host-root");
   const [connectKey, setConnectKey] = useState(0);
   const [showShellMenu, setShowShellMenu] = useState(false);
 
@@ -167,13 +173,22 @@ export function HostShellPage() {
         <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
         <div className="space-y-1">
           <div>
-            You are root inside the <code>panel_host</code> container, which has
-            the VPS host filesystem mounted at <code>/host</code> and shares the
-            host PID + network namespaces.
-          </div>
-          <div className="text-amber-300/80">
-            For a true host-root shell, run:{" "}
-            <code className="font-mono">chroot /host /bin/bash</code>
+            {shell === "host-root" ? (
+              <>
+                You are <b>root on the VPS host</b> (via{" "}
+                <code>chroot /host</code> inside the privileged{" "}
+                <code>panel_host</code> sidecar). Filesystem you see is the
+                VPS's <code>/</code>. Everything you run here affects the
+                host directly.
+              </>
+            ) : (
+              <>
+                You are root inside the <code>panel_host</code> sidecar.
+                Host filesystem is mounted at <code>/host</code>; PID +
+                network namespaces are shared with the host. Switch to{" "}
+                <b>VPS root</b> in the top-right for a real host shell.
+              </>
+            )}
           </div>
         </div>
       </div>

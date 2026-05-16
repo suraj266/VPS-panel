@@ -36,9 +36,20 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
 
       const containerId = req.params.id;
       const requestedShell = req.query.cmd ?? "/bin/sh";
-      const shell = ALLOWED_SHELLS.includes(requestedShell)
-        ? requestedShell
-        : "/bin/sh";
+
+      // Special mode for the panel_host sidecar: chroot into the bind-mounted
+      // host filesystem at /host so the user lands in a real VPS-root shell
+      // instead of the alpine sidecar's chroot. Only valid when targeting
+      // panel_host — guarded so other containers can't escape their root.
+      const isHostRoot =
+        requestedShell === "host-root" && containerId === "panel_host";
+
+      // Otherwise constrain to known shells; anything else falls back to sh.
+      const shellCmd: string[] = isHostRoot
+        ? ["chroot", "/host", "/bin/bash"]
+        : ALLOWED_SHELLS.includes(requestedShell)
+          ? [requestedShell]
+          : ["/bin/sh"];
 
       let exec;
       let stream: NodeJS.ReadWriteStream | null = null;
@@ -46,12 +57,21 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
       try {
         const container = docker.getContainer(containerId);
         exec = await container.exec({
-          Cmd: [shell],
+          Cmd: shellCmd,
           AttachStdin: true,
           AttachStdout: true,
           AttachStderr: true,
           Tty: true,
-          Env: ["TERM=xterm-256color"],
+          Env: [
+            "TERM=xterm-256color",
+            // Provide a usable PATH inside the chroot since the host's
+            // environment isn't inherited automatically.
+            ...(isHostRoot
+              ? [
+                  "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                ]
+              : []),
+          ],
         });
 
         stream = (await exec.start({
