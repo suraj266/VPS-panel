@@ -11,7 +11,8 @@ import {
   stopAppContainer,
   composeWorkDirFor,
 } from "../lib/deploy.js";
-import { parseComposeServices } from "../lib/compose.js";
+import { parseComposeServices, composeProjectName } from "../lib/compose.js";
+import { docker } from "../docker.js";
 import { encrypt } from "../lib/crypto.js";
 import { generateWebhookSecret } from "../lib/webhook.js";
 import { recordAudit } from "../lib/audit.js";
@@ -339,6 +340,51 @@ export const appRoutes: FastifyPluginAsync = async (app) => {
       targetId: id,
     });
     return { webhookSecret: secret };
+  });
+
+  // List the container(s) backing this app, so the per-app Logs / Terminal
+  // sections in the UI know which container ID to open a stream against.
+  // - Simple/dockerfile/static apps run as a single container `panel_<slug>`.
+  // - Compose apps fan out to one container per service, named by docker
+  //   compose project label `panel_<slug>` — we filter on that label so service
+  //   name + state come straight from compose's own metadata.
+  app.get("/apps/:id/containers", async (req, reply) => {
+    requireAuth(req);
+    const { id } = idParam.parse(req.params);
+    const found = await prisma.app.findUnique({ where: { id } });
+    if (!found) return reply.code(404).send({ error: "not found" });
+
+    if (found.buildMode === "compose") {
+      const projectName = composeProjectName(found.slug);
+      const list = await docker.listContainers({
+        all: true,
+        filters: { label: [`com.docker.compose.project=${projectName}`] },
+      });
+      return list.map((c) => ({
+        id: c.Id,
+        name: c.Names[0]?.replace(/^\//, "") ?? c.Id.slice(0, 12),
+        service: c.Labels?.["com.docker.compose.service"] ?? "—",
+        state: c.State,
+        status: c.Status,
+        image: c.Image,
+      }));
+    }
+
+    // Non-compose apps live under a deterministic name. Filter by exact match
+    // so a stale container with a similar-looking name can't surface.
+    const containerName = `panel_${found.slug}`;
+    const list = await docker.listContainers({
+      all: true,
+      filters: { name: [`^/?${containerName}$`] },
+    });
+    return list.map((c) => ({
+      id: c.Id,
+      name: c.Names[0]?.replace(/^\//, "") ?? c.Id.slice(0, 12),
+      service: found.slug,
+      state: c.State,
+      status: c.Status,
+      image: c.Image,
+    }));
   });
 
   // Parse the app's compose file and return its services (with port hints) so

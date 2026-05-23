@@ -3,6 +3,9 @@ import { useParams, useNavigate, Link, useSearchParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Layout } from "../components/layout";
+import { TerminalView } from "../components/terminal-view";
+import { LogStreamView } from "../components/log-stream-view";
+import { Drawer } from "../components/drawer";
 
 interface EnvVar {
   id: string;
@@ -67,6 +70,8 @@ type SectionKey =
   | "env"
   | "domains"
   | "webhook"
+  | "logs"
+  | "terminal"
   | "deployments"
   | "danger";
 
@@ -90,20 +95,16 @@ const SECTIONS: SectionEntry[] = [
     label: "Webhook",
     show: (a) => a.sourceType === "git-repo",
   },
+  { key: "logs", label: "Logs", show: () => true },
+  { key: "terminal", label: "Terminal", show: () => true },
   { key: "deployments", label: "Deployments", show: () => true },
   { key: "danger", label: "Danger Zone", show: () => true },
 ];
 
+const VALID_SECTIONS = new Set<string>(SECTIONS.map((s) => s.key));
+
 function isSectionKey(v: string | null): v is SectionKey {
-  return (
-    v === "general" ||
-    v === "source" ||
-    v === "env" ||
-    v === "domains" ||
-    v === "webhook" ||
-    v === "deployments" ||
-    v === "danger"
-  );
+  return v !== null && VALID_SECTIONS.has(v);
 }
 
 export function AppDetailPage() {
@@ -255,6 +256,10 @@ export function AppDetailPage() {
               webhookSecret={data.webhookSecret ?? null}
               branch={data.branch ?? "main"}
             />
+          )}
+          {resolvedSection === "logs" && <LogsSection appId={data.id} />}
+          {resolvedSection === "terminal" && (
+            <TerminalSection appId={data.id} />
           )}
           {resolvedSection === "deployments" && (
             <DeploymentsSection
@@ -569,6 +574,14 @@ function DeploymentsSection({
   const isCompose = buildMode === "compose";
   const latest = deployments[0];
 
+  // The selected deployment opens in a right-side drawer with full logs.
+  // We track by id so the drawer survives parent re-renders (polling every
+  // 4s would otherwise close it on each refresh if we kept the whole object).
+  const [openId, setOpenId] = useState<string | null>(null);
+  const selected = openId
+    ? deployments.find((d) => d.id === openId) ?? null
+    : null;
+
   return (
     <section>
       <h2 className="text-lg font-semibold mb-2">Deployment history</h2>
@@ -586,87 +599,85 @@ function DeploymentsSection({
             d.imageTag !== "(pending)" &&
             !isCompose;
           return (
-            <details
+            <button
+              type="button"
               key={d.id}
-              className="border-b border-slate-800 last:border-b-0"
+              onClick={() => setOpenId(d.id)}
+              className="w-full text-left p-3 flex items-center justify-between gap-3 border-b border-slate-800 last:border-b-0 hover:bg-slate-800/40 transition-colors"
             >
-              <summary className="p-3 cursor-pointer flex items-center justify-between gap-3">
-                <span className="text-sm flex items-center gap-2 min-w-0 flex-1">
+              <span className="text-sm flex items-center gap-2 min-w-0 flex-1">
+                <span
+                  className={
+                    d.status === "succeeded"
+                      ? "text-green-400"
+                      : d.status === "failed"
+                        ? "text-red-400"
+                        : "text-amber-400"
+                  }
+                >
+                  {d.status}
+                </span>
+                {d.trigger && d.trigger !== "manual" && (
                   <span
                     className={
-                      d.status === "succeeded"
-                        ? "text-green-400"
-                        : d.status === "failed"
-                          ? "text-red-400"
-                          : "text-amber-400"
+                      d.trigger === "webhook"
+                        ? "text-xs bg-blue-900/40 text-blue-300 px-1.5 py-0.5 rounded"
+                        : "text-xs bg-purple-900/40 text-purple-300 px-1.5 py-0.5 rounded"
                     }
                   >
-                    {d.status}
+                    {d.trigger}
                   </span>
-                  {d.trigger && d.trigger !== "manual" && (
-                    <span
-                      className={
-                        d.trigger === "webhook"
-                          ? "text-xs bg-blue-900/40 text-blue-300 px-1.5 py-0.5 rounded"
-                          : "text-xs bg-purple-900/40 text-purple-300 px-1.5 py-0.5 rounded"
+                )}
+                {isLatest && (
+                  <span className="text-xs bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded">
+                    current
+                  </span>
+                )}
+                <span className="font-mono text-slate-400 text-xs truncate">
+                  {d.imageTag}
+                </span>
+                {d.commitMessage && (
+                  <span className="text-xs text-slate-500 truncate">
+                    — {d.commitMessage}
+                  </span>
+                )}
+              </span>
+              <span className="flex items-center gap-2 shrink-0">
+                <span className="text-xs text-slate-500">
+                  {new Date(d.startedAt).toLocaleString()}
+                </span>
+                {canRedeploy && !isLatest && (
+                  // Inner button — stop propagation so the row click doesn't
+                  // also open the drawer when the user really meant "redeploy".
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (
+                        confirm(
+                          `Roll back to image "${d.imageTag}"? Current container will be stopped and replaced.`,
+                        )
+                      ) {
+                        redeploy.mutate(d.id);
                       }
-                    >
-                      {d.trigger}
-                    </span>
-                  )}
-                  {isLatest && (
-                    <span className="text-xs bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded">
-                      current
-                    </span>
-                  )}
-                  <span className="font-mono text-slate-400 text-xs truncate">
-                    {d.imageTag}
+                    }}
+                    disabled={redeploy.isPending}
+                    className="text-xs bg-amber-800 hover:bg-amber-700 rounded px-2 py-0.5 disabled:opacity-50"
+                    title="Roll back to this image"
+                  >
+                    Redeploy
+                  </button>
+                )}
+                {isCompose && d.status === "succeeded" && (
+                  <span
+                    className="text-xs text-slate-600"
+                    title="Compose apps can't be rolled back from history — push a fix commit or change the watched branch."
+                  >
+                    —
                   </span>
-                  {d.commitMessage && (
-                    <span className="text-xs text-slate-500 truncate">
-                      — {d.commitMessage}
-                    </span>
-                  )}
-                </span>
-                <span className="flex items-center gap-2 shrink-0">
-                  <span className="text-xs text-slate-500">
-                    {new Date(d.startedAt).toLocaleString()}
-                  </span>
-                  {canRedeploy && !isLatest && (
-                    <button
-                      onClick={(e) => {
-                        e.preventDefault();
-                        if (
-                          confirm(
-                            `Roll back to image "${d.imageTag}"? Current container will be stopped and replaced.`,
-                          )
-                        ) {
-                          redeploy.mutate(d.id);
-                        }
-                      }}
-                      disabled={redeploy.isPending}
-                      className="text-xs bg-amber-800 hover:bg-amber-700 rounded px-2 py-0.5 disabled:opacity-50"
-                      title="Roll back to this image"
-                    >
-                      Redeploy
-                    </button>
-                  )}
-                  {isCompose && d.status === "succeeded" && (
-                    <span
-                      className="text-xs text-slate-600"
-                      title="Compose apps can't be rolled back from history — push a fix commit or change the watched branch."
-                    >
-                      —
-                    </span>
-                  )}
-                </span>
-              </summary>
-              {d.log && (
-                <pre className="text-xs bg-slate-950 p-3 overflow-x-auto whitespace-pre-wrap text-slate-300">
-                  {d.log}
-                </pre>
-              )}
-            </details>
+                )}
+                <span className="text-slate-500 text-xs">→</span>
+              </span>
+            </button>
           );
         })}
       </div>
@@ -683,6 +694,245 @@ function DeploymentsSection({
             http://localhost:{ports[0].host}
           </a>
         </div>
+      )}
+
+      <Drawer
+        open={!!selected}
+        onClose={() => setOpenId(null)}
+        widthClass="max-w-3xl"
+        title={
+          selected
+            ? `Deployment · ${selected.status}`
+            : "Deployment"
+        }
+        subtitle={
+          selected && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={
+                  selected.status === "succeeded"
+                    ? "text-green-400"
+                    : selected.status === "failed"
+                      ? "text-red-400"
+                      : "text-amber-400"
+                }
+              >
+                ● {selected.status}
+              </span>
+              {selected.trigger && (
+                <span
+                  className={
+                    selected.trigger === "webhook"
+                      ? "text-xs bg-blue-900/40 text-blue-300 px-1.5 py-0.5 rounded"
+                      : selected.trigger === "manual"
+                        ? "text-xs bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded"
+                        : "text-xs bg-purple-900/40 text-purple-300 px-1.5 py-0.5 rounded"
+                  }
+                >
+                  {selected.trigger}
+                </span>
+              )}
+              <span className="font-mono text-slate-400 text-xs">
+                {selected.imageTag}
+              </span>
+              <span className="text-slate-500">
+                started {new Date(selected.startedAt).toLocaleString()}
+              </span>
+              {selected.finishedAt && (
+                <span className="text-slate-500">
+                  · finished{" "}
+                  {new Date(selected.finishedAt).toLocaleTimeString()}
+                </span>
+              )}
+            </div>
+          )
+        }
+      >
+        {selected && (
+          <div className="flex flex-col h-full">
+            {selected.commitMessage && (
+              <div className="px-4 py-3 border-b border-slate-800 text-sm bg-slate-950/50">
+                <div className="text-xs uppercase tracking-wider text-slate-500 mb-1">
+                  Commit
+                </div>
+                <div className="text-slate-200 whitespace-pre-wrap break-words">
+                  {selected.commitMessage}
+                </div>
+              </div>
+            )}
+            <div className="flex-1 overflow-auto">
+              {selected.log ? (
+                <pre className="text-xs bg-slate-950 p-4 whitespace-pre-wrap break-words text-slate-300 font-mono leading-relaxed min-h-full">
+                  {selected.log}
+                </pre>
+              ) : (
+                <div className="p-4 text-sm text-slate-500">
+                  No log captured for this deployment yet.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </Drawer>
+    </section>
+  );
+}
+
+// ============================================================================
+// Logs — live container log stream. For compose apps with multiple services,
+// shows a service selector so the user can flip between containers without
+// leaving the page.
+// ============================================================================
+
+interface AppContainer {
+  id: string;
+  name: string;
+  service: string;
+  state: string;
+  status: string;
+  image: string;
+}
+
+function useAppContainers(appId: string) {
+  return useQuery({
+    queryKey: ["app-containers", appId],
+    queryFn: () => api<AppContainer[]>(`/apps/${appId}/containers`),
+    refetchInterval: 5000,
+    retry: false,
+  });
+}
+
+function ContainerPicker({
+  containers,
+  selectedId,
+  onSelect,
+}: {
+  containers: AppContainer[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+}) {
+  // Only render a picker when there's actually a choice to make — for the
+  // single-container case (most non-compose apps) it's noise.
+  if (containers.length <= 1) return null;
+  return (
+    <div className="flex items-center gap-2 mb-3 text-xs">
+      <span className="text-slate-500">Service:</span>
+      <select
+        value={selectedId}
+        onChange={(e) => onSelect(e.target.value)}
+        className="bg-slate-800 rounded px-2 py-1 font-mono"
+      >
+        {containers.map((c) => (
+          <option key={c.id} value={c.id}>
+            {c.service} ({c.state})
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function LogsSection({ appId }: { appId: string }) {
+  const containers = useAppContainers(appId);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Default to the first running container. Re-pick if the previously
+  // selected one disappears (e.g. service removed from compose).
+  useEffect(() => {
+    const list = containers.data ?? [];
+    if (!list.length) return;
+    if (selectedId && list.some((c) => c.id === selectedId)) return;
+    const running = list.find((c) => c.state === "running") ?? list[0]!;
+    setSelectedId(running.id);
+  }, [containers.data, selectedId]);
+
+  return (
+    <section>
+      <h2 className="text-lg font-semibold mb-2">Logs</h2>
+
+      {containers.isLoading && (
+        <div className="text-sm text-slate-500">Loading containers…</div>
+      )}
+      {containers.error && (
+        <div className="text-sm text-red-400 bg-red-950/40 border border-red-900/50 rounded px-3 py-2">
+          {(containers.error as Error).message}
+        </div>
+      )}
+      {containers.data && containers.data.length === 0 && (
+        <div className="text-sm text-slate-500 bg-slate-900 border border-slate-800 rounded p-4">
+          No container running for this app yet. Deploy it first.
+        </div>
+      )}
+
+      {containers.data && selectedId && (
+        <>
+          <ContainerPicker
+            containers={containers.data}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+          />
+          <LogStreamView
+            containerId={selectedId}
+            tail={500}
+            height="calc(100vh - 320px)"
+          />
+        </>
+      )}
+    </section>
+  );
+}
+
+// ============================================================================
+// Terminal — interactive shell inside the app's container. For compose apps,
+// lets the user pick which service to exec into.
+// ============================================================================
+
+function TerminalSection({ appId }: { appId: string }) {
+  const containers = useAppContainers(appId);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const list = containers.data ?? [];
+    if (!list.length) return;
+    if (selectedId && list.some((c) => c.id === selectedId)) return;
+    // Terminal only makes sense for running containers — pick one.
+    const running = list.find((c) => c.state === "running");
+    if (running) setSelectedId(running.id);
+  }, [containers.data, selectedId]);
+
+  const running = containers.data?.filter((c) => c.state === "running") ?? [];
+
+  return (
+    <section>
+      <h2 className="text-lg font-semibold mb-2">Terminal</h2>
+
+      {containers.isLoading && (
+        <div className="text-sm text-slate-500">Loading containers…</div>
+      )}
+      {containers.error && (
+        <div className="text-sm text-red-400 bg-red-950/40 border border-red-900/50 rounded px-3 py-2">
+          {(containers.error as Error).message}
+        </div>
+      )}
+      {containers.data && running.length === 0 && (
+        <div className="text-sm text-slate-500 bg-slate-900 border border-slate-800 rounded p-4">
+          No running container for this app. Start it via{" "}
+          <b>Build &amp; Deploy</b> to open a shell here.
+        </div>
+      )}
+
+      {running.length > 0 && selectedId && (
+        <>
+          <ContainerPicker
+            containers={running}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+          />
+          <TerminalView
+            containerId={selectedId}
+            height="calc(100vh - 320px)"
+          />
+        </>
       )}
     </section>
   );
