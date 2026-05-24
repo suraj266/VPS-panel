@@ -15,6 +15,31 @@ interface SiteConfigInput {
   hostname: string;
   upstream: UpstreamTarget;
   sslEnabled: boolean;
+  /**
+   * Free-form nginx directives the user pasted in the per-domain Advanced
+   * panel. Injected at server level inside both HTTP and HTTPS server blocks
+   * so directives like client_max_body_size / proxy_read_timeout apply to all
+   * locations. Null/empty = no injection.
+   */
+  customNginxConfig?: string | null;
+}
+
+// Render the user-supplied directives as an indented block surrounded by
+// marker comments. Empty/whitespace-only input is treated as absent so the
+// generated conf doesn't end up with naked markers around nothing.
+function customBlock(raw: string | null | undefined, indent = "    "): string {
+  if (!raw) return "";
+  const normalised = raw.replace(/\r\n/g, "\n");
+  if (!normalised.trim()) return "";
+  const body = normalised
+    .split("\n")
+    .map((line) => (line.trim() ? `${indent}${line.trim()}` : ""))
+    .join("\n")
+    .replace(/\n+$/, "");
+  return `${indent}# --- custom nginx config (panel-managed) ---
+${body}
+${indent}# --- end custom ---
+`;
 }
 
 // Common proxy block reused by HTTP-only and HTTPS server blocks. Pulled into
@@ -42,7 +67,7 @@ function proxyBlock(upstreamUrl: string): string {
 }
 
 export function siteConfigFor(input: SiteConfigInput): string {
-  const { hostname, upstream, sslEnabled } = input;
+  const { hostname, upstream, sslEnabled, customNginxConfig } = input;
   const upstreamUrl = `http://${upstream.host}:${upstream.port}`;
 
   // Per-server-name `map` that turns the HTTP Upgrade request header into a
@@ -58,6 +83,11 @@ export function siteConfigFor(input: SiteConfigInput): string {
     ''      "";
 }
 `;
+
+  // Only inject custom directives into server blocks that actually serve the
+  // app. The HTTP→HTTPS redirect variant skips them because its only job is to
+  // 301 to the HTTPS block (which gets the custom block anyway).
+  const custom = customBlock(customNginxConfig);
 
   const httpServer = `
 server {
@@ -75,7 +105,7 @@ server {
     location / {
         return 301 https://$host$request_uri;
     }`
-        : `location / {
+        : `${custom ? custom + "\n" : ""}    location / {
 ${proxyBlock(upstreamUrl).replace(/\$connection_upgrade/g, `$${mapName}`)}
     }`
     }
@@ -93,7 +123,7 @@ server {
     ssl_certificate     /etc/letsencrypt/live/${hostname}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${hostname}/privkey.pem;
 
-    location / {
+${custom ? custom + "\n" : ""}    location / {
 ${proxyBlock(upstreamUrl).replace(/\$connection_upgrade/g, `$${mapName}`)}
     }
 }
@@ -158,11 +188,21 @@ export async function applySiteConfig(input: SiteConfigInput): Promise<void> {
   const filename = `${input.hostname}.conf`;
   const config = siteConfigFor(input);
 
+  // Back up any existing conf so a bad edit (e.g. malformed custom directives)
+  // doesn't knock the live site offline — if `nginx -t` rejects the new file,
+  // we restore the previous good copy. For a brand-new domain there's no
+  // backup, so the rollback path falls back to deleting the file.
+  const priorConfig = await readNginxConf(filename);
+
   await writeFileToNginx(filename, config);
 
   const test = await execNginx(["nginx", "-t"]);
   if (test.exitCode !== 0) {
-    await deleteFileFromNginx(filename);
+    if (priorConfig !== null) {
+      await writeFileToNginx(filename, priorConfig);
+    } else {
+      await deleteFileFromNginx(filename);
+    }
     throw new Error(
       `nginx config invalid for ${input.hostname}:\n${test.stderr || test.stdout}`,
     );
@@ -172,6 +212,12 @@ export async function applySiteConfig(input: SiteConfigInput): Promise<void> {
   if (reload.exitCode !== 0) {
     throw new Error(`nginx reload failed: ${reload.stderr || reload.stdout}`);
   }
+}
+
+async function readNginxConf(filename: string): Promise<string | null> {
+  const res = await execNginx(["cat", `${CONF_DIR}/${filename}`]);
+  if (res.exitCode !== 0) return null;
+  return res.stdout;
 }
 
 export async function removeSiteConfig(hostname: string): Promise<void> {

@@ -21,6 +21,12 @@ const createSchema = z.object({
   port: z.number().int().min(1).max(65535),
   serviceName: z.string().regex(/^[a-zA-Z0-9_.-]+$/, "invalid service name").optional(),
   sslEnabled: z.boolean().default(false),
+  customNginxConfig: z.string().max(8192).optional(),
+});
+
+const updateSchema = z.object({
+  // Nullable because "Clear" in the UI sends null to drop any custom block.
+  customNginxConfig: z.string().max(8192).nullable(),
 });
 
 interface AppWithMode {
@@ -85,6 +91,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
           port: body.port,
           serviceName: body.serviceName ?? null,
           sslEnabled: body.sslEnabled,
+          customNginxConfig: body.customNginxConfig?.trim() || null,
         },
       });
     } catch (err) {
@@ -103,6 +110,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
           port: body.port,
         },
         sslEnabled: body.sslEnabled,
+        customNginxConfig: domain.customNginxConfig,
       });
     } catch (err) {
       // Rollback DB row if nginx config failed
@@ -192,6 +200,7 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
             port: domain.port,
           },
           sslEnabled: true,
+          customNginxConfig: domain.customNginxConfig,
         });
 
         await recordAudit(req, {
@@ -238,11 +247,72 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
           port: domain.port,
         },
         sslEnabled: domain.sslEnabled,
+        customNginxConfig: domain.customNginxConfig,
       });
       return { ok: true };
     } catch (err) {
       const message = err instanceof Error ? err.message : "nginx apply failed";
       return reply.code(400).send({ error: message });
     }
+  });
+
+  // Edit per-domain custom nginx directives. Writes the new value, regenerates
+  // the nginx site config, and validates via `nginx -t`. On validation failure
+  // we revert the DB row back to its previous value AND the on-disk conf is
+  // restored to the previous good copy by applySiteConfig — so a bad edit
+  // never knocks the live site offline.
+  app.patch("/apps/:appId/domains/:id", async (req, reply) => {
+    requireAuth(req);
+    const { appId } = appIdParam.parse(req.params);
+    const { id } = idParam.parse(req.params);
+    const body = updateSchema.parse(req.body);
+
+    const domain = await prisma.domain.findUnique({ where: { id } });
+    if (!domain || domain.appId !== appId) {
+      return reply.code(404).send({ error: "domain not found" });
+    }
+    const appRecord = await prisma.app.findUniqueOrThrow({
+      where: { id: appId },
+    });
+
+    const newConfig = body.customNginxConfig?.trim() || null;
+    const previousConfig = domain.customNginxConfig;
+
+    const updated = await prisma.domain.update({
+      where: { id },
+      data: { customNginxConfig: newConfig },
+    });
+
+    try {
+      await applySiteConfig({
+        hostname: domain.hostname,
+        upstream: {
+          host: upstreamHostFor(appRecord, domain.serviceName),
+          port: domain.port,
+        },
+        sslEnabled: domain.sslEnabled,
+        customNginxConfig: newConfig,
+      });
+    } catch (err) {
+      // Revert DB so it stays in sync with the on-disk conf we just restored.
+      await prisma.domain
+        .update({
+          where: { id },
+          data: { customNginxConfig: previousConfig },
+        })
+        .catch(() => {});
+      const message =
+        err instanceof Error ? err.message : "nginx apply failed";
+      return reply.code(400).send({ error: message });
+    }
+
+    await recordAudit(req, {
+      action: "domain.update.nginx_config",
+      targetType: "domain",
+      targetId: domain.id,
+      diff: { hostname: domain.hostname },
+    });
+
+    return updated;
   });
 };

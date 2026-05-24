@@ -141,14 +141,19 @@ model EnvVar {
 }
 
 model Domain {
-  id            String    @id @default(cuid())
-  appId         String
-  app           App       @relation(fields: [appId], references: [id], onDelete: Cascade)
-  hostname      String    @unique
-  port          Int
-  serviceName   String? // compose apps only: which service to route to
-  sslEnabled    Boolean   @default(false)
-  certExpiresAt DateTime?
+  id                String    @id @default(cuid())
+  appId             String
+  app               App       @relation(fields: [appId], references: [id], onDelete: Cascade)
+  hostname          String    @unique
+  port              Int
+  serviceName       String? // compose apps only: which service to route to
+  sslEnabled        Boolean   @default(false)
+  certExpiresAt     DateTime?
+  // User-supplied nginx directives injected inside the location { } block —
+  // e.g. `client_max_body_size 50M;`, `proxy_read_timeout 600s;`. Validated by
+  // `nginx -t` at apply time; bad config is rejected and the previous one
+  // stays in place.
+  customNginxConfig String?
 }
 
 model Deployment {

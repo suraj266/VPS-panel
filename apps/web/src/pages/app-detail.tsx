@@ -32,6 +32,7 @@ interface Domain {
   serviceName: string | null;
   sslEnabled: boolean;
   certExpiresAt: string | null;
+  customNginxConfig: string | null;
 }
 
 interface AppDetail {
@@ -1075,6 +1076,7 @@ function DomainsSection({
   });
 
   const [sslFor, setSslFor] = useState<Domain | null>(null);
+  const [advancedFor, setAdvancedFor] = useState<Domain | null>(null);
 
   return (
     <section>
@@ -1115,6 +1117,14 @@ function DomainsSection({
                 → {d.serviceName ? `${d.serviceName}:` : ":"}
                 {d.port}
               </span>
+              {d.customNginxConfig && (
+                <span
+                  className="text-[10px] uppercase tracking-wider bg-indigo-600/15 border border-indigo-500/30 text-indigo-300 px-1.5 py-0.5 rounded ml-2"
+                  title="Custom nginx directives are applied for this domain"
+                >
+                  custom
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-2">
               {d.sslEnabled ? (
@@ -1137,6 +1147,13 @@ function DomainsSection({
                   Issue SSL
                 </button>
               )}
+              <button
+                onClick={() => setAdvancedFor(d)}
+                className="text-xs bg-slate-800 hover:bg-slate-700 rounded px-2 py-1"
+                title="Custom nginx directives for this domain"
+              >
+                Advanced
+              </button>
               <button
                 onClick={() => reapply.mutate(d.id)}
                 disabled={reapply.isPending}
@@ -1266,7 +1283,146 @@ function DomainsSection({
           onClose={() => setSslFor(null)}
         />
       )}
+
+      <AdvancedNginxDrawer
+        appId={appId}
+        domain={advancedFor}
+        onClose={() => setAdvancedFor(null)}
+      />
     </section>
+  );
+}
+
+// ============================================================================
+// Advanced Nginx — per-domain custom directives editor. Pastes get injected
+// at server level (both HTTP and HTTPS blocks) before location / { }, so
+// server-context directives like client_max_body_size / proxy_read_timeout /
+// custom headers actually take effect. The backend runs `nginx -t` before
+// applying; bad config is rejected and the previous good copy stays in place.
+// ============================================================================
+
+const NGINX_PLACEHOLDER = `# Common examples — uncomment and tweak as needed.
+# client_max_body_size 50M;
+# proxy_read_timeout 600s;
+# proxy_buffering off;            # for streaming / SSE
+# add_header X-Frame-Options DENY;`;
+
+function AdvancedNginxDrawer({
+  appId,
+  domain,
+  onClose,
+}: {
+  appId: string;
+  domain: Domain | null;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const [value, setValue] = useState("");
+  const [serverError, setServerError] = useState<string | null>(null);
+
+  // Sync the textarea with the selected domain each time the drawer opens.
+  // Mounted-but-closed renders pass domain=null, so we only hydrate when one
+  // is actually selected.
+  useEffect(() => {
+    if (!domain) return;
+    setValue(domain.customNginxConfig ?? "");
+    setServerError(null);
+  }, [domain]);
+
+  const save = useMutation({
+    mutationFn: (next: string | null) =>
+      api<Domain>(`/apps/${appId}/domains/${domain!.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ customNginxConfig: next }),
+      }),
+    onSuccess: () => {
+      setServerError(null);
+      qc.invalidateQueries({ queryKey: ["app", appId] });
+      onClose();
+    },
+    onError: (err: Error) => {
+      // Keep the drawer + textarea contents intact so the user can fix the
+      // bad directive instead of starting over.
+      setServerError(err.message);
+    },
+  });
+
+  function onSave() {
+    setServerError(null);
+    const trimmed = value.trim();
+    save.mutate(trimmed.length ? value : null);
+  }
+
+  function onClear() {
+    if (!confirm("Clear custom nginx config for this domain?")) return;
+    setValue("");
+    setServerError(null);
+    save.mutate(null);
+  }
+
+  return (
+    <Drawer
+      open={!!domain}
+      onClose={onClose}
+      widthClass="max-w-2xl"
+      title={domain ? `Advanced — ${domain.hostname}` : "Advanced"}
+      subtitle={
+        domain && (
+          <span>
+            Directives injected at server level (both HTTP and HTTPS) before{" "}
+            <code className="text-slate-400">location /</code>. Validated with{" "}
+            <code className="text-slate-400">nginx -t</code> on save — invalid
+            config is rejected and the previous good config stays in place.
+          </span>
+        )
+      }
+    >
+      {domain && (
+        <div className="p-4 space-y-3 flex flex-col h-full">
+          <textarea
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            spellCheck={false}
+            placeholder={NGINX_PLACEHOLDER}
+            className="flex-1 min-h-[18rem] bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-xs leading-relaxed resize-none"
+          />
+
+          {serverError && (
+            <div className="bg-red-950/40 border border-red-900/50 rounded-lg px-3 py-2 text-xs text-red-300 whitespace-pre-wrap font-mono">
+              {serverError}
+            </div>
+          )}
+
+          <div className="flex items-center justify-between gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={onClear}
+              disabled={save.isPending || !domain.customNginxConfig}
+              className="text-xs text-slate-400 hover:text-red-300 disabled:opacity-40 disabled:cursor-not-allowed px-2 py-1"
+            >
+              Clear
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="text-sm text-slate-400 hover:text-white px-3 py-2"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={onSave}
+                disabled={save.isPending}
+                className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg px-4 py-2 text-sm font-medium"
+              >
+                {save.isPending ? "Validating…" : "Save & apply"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Drawer>
   );
 }
 
