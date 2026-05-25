@@ -25,8 +25,15 @@ const createSchema = z.object({
 });
 
 const updateSchema = z.object({
+  hostname: z.string().regex(hostnameRegex, "invalid hostname").optional(),
+  port: z.number().int().min(1).max(65535).optional(),
+  serviceName: z
+    .string()
+    .regex(/^[a-zA-Z0-9_.-]+$/, "invalid service name")
+    .nullable()
+    .optional(),
   // Nullable because "Clear" in the UI sends null to drop any custom block.
-  customNginxConfig: z.string().max(8192).nullable(),
+  customNginxConfig: z.string().max(8192).nullable().optional(),
 });
 
 interface AppWithMode {
@@ -256,11 +263,21 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
-  // Edit per-domain custom nginx directives. Writes the new value, regenerates
-  // the nginx site config, and validates via `nginx -t`. On validation failure
-  // we revert the DB row back to its previous value AND the on-disk conf is
-  // restored to the previous good copy by applySiteConfig — so a bad edit
-  // never knocks the live site offline.
+  // Edit a domain in-place — hostname, port, service, and/or custom nginx
+  // directives. Mirrors Coolify's "change domain → save → done" flow so the
+  // user doesn't have to remove-and-recreate. Atomicity rules:
+  //   1. Compute the merged target state (untouched fields keep their current
+  //      values).
+  //   2. Reject hostname collisions explicitly (409) so the user gets a clear
+  //      message instead of a generic Prisma unique violation.
+  //   3. Update the DB row first, then call applySiteConfig with the new
+  //      hostname. applySiteConfig backs up the prior conf at the new path
+  //      (none, for a fresh hostname) — if `nginx -t` fails we revert the DB
+  //      row and the on-disk state is already clean.
+  //   4. On hostname change: clear the old hostname's conf only AFTER the new
+  //      one validates. Cert files are intentionally left alone so a user who
+  //      flips back later still has them. The new hostname starts SSL-off
+  //      because the old cert doesn't match it — user re-issues a fresh cert.
   app.patch("/apps/:appId/domains/:id", async (req, reply) => {
     requireAuth(req);
     const { appId } = appIdParam.parse(req.params);
@@ -275,31 +292,88 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
       where: { id: appId },
     });
 
-    const newConfig = body.customNginxConfig?.trim() || null;
-    const previousConfig = domain.customNginxConfig;
+    const oldHostname = domain.hostname;
+    const newHostname = body.hostname ?? domain.hostname;
+    const newPort = body.port ?? domain.port;
+    const newServiceName =
+      body.serviceName === undefined ? domain.serviceName : body.serviceName;
+    const newCustomConfig =
+      body.customNginxConfig === undefined
+        ? domain.customNginxConfig
+        : body.customNginxConfig?.trim() || null;
+
+    const hostnameChanged = newHostname !== oldHostname;
+    // The cert at the old hostname doesn't match a new one — drop SSL state so
+    // the UI prompts the user to re-issue. (Cert files stay on disk; certbot
+    // will overwrite if the user re-issues later.)
+    const newSslEnabled = hostnameChanged ? false : domain.sslEnabled;
+    const newCertExpiresAt = hostnameChanged ? null : domain.certExpiresAt;
+
+    if (
+      appRecord.sourceType === "git-repo" &&
+      appRecord.buildMode === "compose" &&
+      !newServiceName
+    ) {
+      return reply.code(400).send({
+        error: "serviceName is required for compose apps",
+      });
+    }
+
+    // Reject collisions with another domain before we touch anything else.
+    if (hostnameChanged) {
+      const conflict = await prisma.domain.findUnique({
+        where: { hostname: newHostname },
+      });
+      if (conflict && conflict.id !== id) {
+        return reply.code(409).send({ error: "hostname already bound" });
+      }
+    }
+
+    // Snapshot pre-update state so we can roll the row back if nginx rejects.
+    const prevState = {
+      hostname: domain.hostname,
+      port: domain.port,
+      serviceName: domain.serviceName,
+      sslEnabled: domain.sslEnabled,
+      certExpiresAt: domain.certExpiresAt,
+      customNginxConfig: domain.customNginxConfig,
+    };
 
     const updated = await prisma.domain.update({
       where: { id },
-      data: { customNginxConfig: newConfig },
+      data: {
+        hostname: newHostname,
+        port: newPort,
+        serviceName: newServiceName,
+        customNginxConfig: newCustomConfig,
+        sslEnabled: newSslEnabled,
+        certExpiresAt: newCertExpiresAt,
+      },
     });
 
     try {
       await applySiteConfig({
-        hostname: domain.hostname,
+        hostname: newHostname,
         upstream: {
-          host: upstreamHostFor(appRecord, domain.serviceName),
-          port: domain.port,
+          host: upstreamHostFor(appRecord, newServiceName),
+          port: newPort,
         },
-        sslEnabled: domain.sslEnabled,
-        customNginxConfig: newConfig,
+        sslEnabled: newSslEnabled,
+        customNginxConfig: newCustomConfig,
       });
+
+      if (hostnameChanged) {
+        // New conf is live; safe to drop the old hostname's site config.
+        // Best-effort — if removeSiteConfig fails (e.g. file already gone)
+        // we don't fail the whole edit.
+        await removeSiteConfig(oldHostname).catch(() => {});
+      }
     } catch (err) {
-      // Revert DB so it stays in sync with the on-disk conf we just restored.
+      // applySiteConfig already rolled back the on-disk conf at the new
+      // hostname (no prior file existed for a renamed domain, so it deleted).
+      // We just need to put the DB row back.
       await prisma.domain
-        .update({
-          where: { id },
-          data: { customNginxConfig: previousConfig },
-        })
+        .update({ where: { id }, data: prevState })
         .catch(() => {});
       const message =
         err instanceof Error ? err.message : "nginx apply failed";
@@ -307,10 +381,19 @@ export const domainRoutes: FastifyPluginAsync = async (app) => {
     }
 
     await recordAudit(req, {
-      action: "domain.update.nginx_config",
+      action: hostnameChanged ? "domain.update.hostname" : "domain.update",
       targetType: "domain",
       targetId: domain.id,
-      diff: { hostname: domain.hostname },
+      diff: {
+        from: prevState,
+        to: {
+          hostname: newHostname,
+          port: newPort,
+          serviceName: newServiceName,
+          sslEnabled: newSslEnabled,
+          customNginxConfig: newCustomConfig,
+        },
+      },
     });
 
     return updated;

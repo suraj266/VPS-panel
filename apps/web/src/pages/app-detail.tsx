@@ -1076,7 +1076,7 @@ function DomainsSection({
   });
 
   const [sslFor, setSslFor] = useState<Domain | null>(null);
-  const [advancedFor, setAdvancedFor] = useState<Domain | null>(null);
+  const [editFor, setEditFor] = useState<Domain | null>(null);
 
   return (
     <section>
@@ -1148,11 +1148,11 @@ function DomainsSection({
                 </button>
               )}
               <button
-                onClick={() => setAdvancedFor(d)}
+                onClick={() => setEditFor(d)}
                 className="text-xs bg-slate-800 hover:bg-slate-700 rounded px-2 py-1"
-                title="Custom nginx directives for this domain"
+                title="Edit hostname, port, service, or custom nginx directives"
               >
-                Advanced
+                Edit
               </button>
               <button
                 onClick={() => reapply.mutate(d.id)}
@@ -1284,21 +1284,23 @@ function DomainsSection({
         />
       )}
 
-      <AdvancedNginxDrawer
+      <EditDomainDrawer
         appId={appId}
-        domain={advancedFor}
-        onClose={() => setAdvancedFor(null)}
+        appIsCompose={isCompose}
+        domain={editFor}
+        onClose={() => setEditFor(null)}
       />
     </section>
   );
 }
 
 // ============================================================================
-// Advanced Nginx — per-domain custom directives editor. Pastes get injected
-// at server level (both HTTP and HTTPS blocks) before location / { }, so
-// server-context directives like client_max_body_size / proxy_read_timeout /
-// custom headers actually take effect. The backend runs `nginx -t` before
-// applying; bad config is rejected and the previous good copy stays in place.
+// Edit domain — Coolify-style in-place editor. Change hostname / port /
+// service / custom nginx in one drawer, hit Save & apply, done. Backend's
+// PATCH /apps/:appId/domains/:id handles atomically: validates the new conf
+// with `nginx -t`, swaps the on-disk file, then drops the old hostname's
+// site config. If validation fails the DB row reverts and the original
+// hostname keeps serving traffic.
 // ============================================================================
 
 const NGINX_PLACEHOLDER = `# Common examples — uncomment and tweak as needed.
@@ -1307,33 +1309,59 @@ const NGINX_PLACEHOLDER = `# Common examples — uncomment and tweak as needed.
 # proxy_buffering off;            # for streaming / SSE
 # add_header X-Frame-Options DENY;`;
 
-function AdvancedNginxDrawer({
+interface EditPayload {
+  hostname?: string;
+  port?: number;
+  serviceName?: string | null;
+  customNginxConfig?: string | null;
+}
+
+function EditDomainDrawer({
   appId,
+  appIsCompose,
   domain,
   onClose,
 }: {
   appId: string;
+  appIsCompose: boolean;
   domain: Domain | null;
   onClose: () => void;
 }) {
   const qc = useQueryClient();
-  const [value, setValue] = useState("");
+  const [hostname, setHostname] = useState("");
+  const [port, setPort] = useState("80");
+  const [serviceName, setServiceName] = useState("");
+  const [customConfig, setCustomConfig] = useState("");
   const [serverError, setServerError] = useState<string | null>(null);
 
-  // Sync the textarea with the selected domain each time the drawer opens.
-  // Mounted-but-closed renders pass domain=null, so we only hydrate when one
-  // is actually selected.
+  // Hydrate form whenever the drawer is opened against a different domain.
   useEffect(() => {
     if (!domain) return;
-    setValue(domain.customNginxConfig ?? "");
+    setHostname(domain.hostname);
+    setPort(String(domain.port));
+    setServiceName(domain.serviceName ?? "");
+    setCustomConfig(domain.customNginxConfig ?? "");
     setServerError(null);
   }, [domain]);
 
+  // Auto-detect compose services so the user picks from a dropdown instead of
+  // typing. React Query caches by key, so this dedupes with the same query
+  // used by the "Add domain" form.
+  const services = useQuery({
+    queryKey: ["compose-services", appId],
+    queryFn: () =>
+      api<{
+        services: Array<{ name: string; image: string | null; ports: number[] }>;
+      }>(`/apps/${appId}/compose/services`),
+    enabled: appIsCompose && !!domain,
+    retry: false,
+  });
+
   const save = useMutation({
-    mutationFn: (next: string | null) =>
+    mutationFn: (body: EditPayload) =>
       api<Domain>(`/apps/${appId}/domains/${domain!.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ customNginxConfig: next }),
+        body: JSON.stringify(body),
       }),
     onSuccess: () => {
       setServerError(null);
@@ -1341,51 +1369,155 @@ function AdvancedNginxDrawer({
       onClose();
     },
     onError: (err: Error) => {
-      // Keep the drawer + textarea contents intact so the user can fix the
-      // bad directive instead of starting over.
+      // Keep form contents so the user can fix and retry instead of starting
+      // over.
       setServerError(err.message);
     },
   });
 
   function onSave() {
+    if (!domain) return;
     setServerError(null);
-    const trimmed = value.trim();
-    save.mutate(trimmed.length ? value : null);
+    const portNum = Number.parseInt(port, 10);
+    if (!Number.isFinite(portNum) || portNum < 1 || portNum > 65535) {
+      setServerError("port must be a number between 1 and 65535");
+      return;
+    }
+    const trimmedConfig = customConfig.trim();
+    save.mutate({
+      hostname: hostname.trim(),
+      port: portNum,
+      serviceName: appIsCompose ? serviceName.trim() || null : null,
+      customNginxConfig: trimmedConfig.length ? customConfig : null,
+    });
   }
 
-  function onClear() {
-    if (!confirm("Clear custom nginx config for this domain?")) return;
-    setValue("");
-    setServerError(null);
-    save.mutate(null);
-  }
+  const dirty =
+    !!domain &&
+    (hostname.trim() !== domain.hostname ||
+      Number.parseInt(port, 10) !== domain.port ||
+      (serviceName.trim() || null) !== (domain.serviceName ?? null) ||
+      (customConfig.trim() || null) !== (domain.customNginxConfig ?? null));
+
+  // Surface to the user that changing the hostname drops the existing SSL
+  // state — they'll need to re-issue a cert at the new name.
+  const hostnameChanged = !!domain && hostname.trim() !== domain.hostname;
 
   return (
     <Drawer
       open={!!domain}
       onClose={onClose}
       widthClass="max-w-2xl"
-      title={domain ? `Advanced — ${domain.hostname}` : "Advanced"}
+      title={domain ? `Edit — ${domain.hostname}` : "Edit domain"}
       subtitle={
         domain && (
           <span>
-            Directives injected at server level (both HTTP and HTTPS) before{" "}
-            <code className="text-slate-400">location /</code>. Validated with{" "}
-            <code className="text-slate-400">nginx -t</code> on save — invalid
-            config is rejected and the previous good config stays in place.
+            Change hostname, port, service, or custom nginx directives. Saved
+            atomically — bad config is rejected and the previous good config
+            stays in place.
           </span>
         )
       }
     >
       {domain && (
-        <div className="p-4 space-y-3 flex flex-col h-full">
-          <textarea
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            spellCheck={false}
-            placeholder={NGINX_PLACEHOLDER}
-            className="flex-1 min-h-[18rem] bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-xs leading-relaxed resize-none"
-          />
+        <div className="p-4 space-y-4 flex flex-col h-full">
+          <div>
+            <label className="block text-xs uppercase tracking-wider text-slate-500 mb-1.5">
+              Hostname
+            </label>
+            <input
+              value={hostname}
+              onChange={(e) =>
+                setHostname(e.target.value.trim().toLowerCase())
+              }
+              placeholder="shop.example.com"
+              className="w-full bg-slate-800/60 border border-slate-700 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            {hostnameChanged && (
+              <p className="text-xs text-amber-300 mt-1.5">
+                Hostname change: the SSL cert at <code>{domain.hostname}</code>{" "}
+                doesn't apply here. SSL will reset to off — re-issue a Let's
+                Encrypt cert after saving + pointing DNS at this VPS.
+              </p>
+            )}
+          </div>
+
+          <div className="grid grid-cols-[1fr_120px] gap-2">
+            {appIsCompose && (
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-slate-500 mb-1.5">
+                  Service
+                </label>
+                {services.isLoading ? (
+                  <div className="text-xs text-slate-500 py-2">
+                    Detecting services…
+                  </div>
+                ) : services.error || !services.data?.services.length ? (
+                  <input
+                    value={serviceName}
+                    onChange={(e) =>
+                      setServiceName(e.target.value.trim())
+                    }
+                    placeholder="web"
+                    className="w-full bg-slate-800/60 border border-slate-700 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                ) : (
+                  <select
+                    value={serviceName}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setServiceName(next);
+                      const match = services.data?.services.find(
+                        (s) => s.name === next,
+                      );
+                      if (match && match.ports.length > 0) {
+                        setPort(String(match.ports[0]));
+                      }
+                    }}
+                    className="w-full bg-slate-800/60 border border-slate-700 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    {(services.data?.services ?? []).map((s) => (
+                      <option key={s.name} value={s.name}>
+                        {s.name}
+                        {s.ports.length > 0
+                          ? ` (:${s.ports.join(", :")})`
+                          : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
+            <div className={appIsCompose ? "" : "col-span-2"}>
+              <label className="block text-xs uppercase tracking-wider text-slate-500 mb-1.5">
+                Port
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                value={port}
+                onChange={(e) => setPort(e.target.value)}
+                className="w-full bg-slate-800/60 border border-slate-700 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-col flex-1 min-h-0">
+            <label className="block text-xs uppercase tracking-wider text-slate-500 mb-1.5">
+              Custom nginx directives
+              <span className="ml-2 normal-case tracking-normal text-slate-600">
+                injected at server level (both HTTP and HTTPS)
+              </span>
+            </label>
+            <textarea
+              value={customConfig}
+              onChange={(e) => setCustomConfig(e.target.value)}
+              spellCheck={false}
+              placeholder={NGINX_PLACEHOLDER}
+              className="flex-1 min-h-[12rem] bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-xs leading-relaxed resize-none"
+            />
+          </div>
 
           {serverError && (
             <div className="bg-red-950/40 border border-red-900/50 rounded-lg px-3 py-2 text-xs text-red-300 whitespace-pre-wrap font-mono">
@@ -1393,32 +1525,22 @@ function AdvancedNginxDrawer({
             </div>
           )}
 
-          <div className="flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center justify-end gap-2 shrink-0">
             <button
               type="button"
-              onClick={onClear}
-              disabled={save.isPending || !domain.customNginxConfig}
-              className="text-xs text-slate-400 hover:text-red-300 disabled:opacity-40 disabled:cursor-not-allowed px-2 py-1"
+              onClick={onClose}
+              className="text-sm text-slate-400 hover:text-white px-3 py-2"
             >
-              Clear
+              Cancel
             </button>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={onClose}
-                className="text-sm text-slate-400 hover:text-white px-3 py-2"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={onSave}
-                disabled={save.isPending}
-                className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg px-4 py-2 text-sm font-medium"
-              >
-                {save.isPending ? "Validating…" : "Save & apply"}
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={save.isPending || !dirty || !hostname.trim()}
+              className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg px-4 py-2 text-sm font-medium"
+            >
+              {save.isPending ? "Validating…" : "Save & apply"}
+            </button>
           </div>
         </div>
       )}

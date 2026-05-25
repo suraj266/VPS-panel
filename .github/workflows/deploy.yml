@@ -1,0 +1,68 @@
+name: Deploy panel to VPS
+
+# Push to main → SSH into the VPS → run `panel update`, which pulls the latest
+# code, rebuilds the panel_app image, and restarts the container. Schema
+# changes are picked up automatically (the container CMD runs
+# `prisma db push --skip-generate` on start).
+#
+# Skip a deploy by including [skip ci] in the commit message.
+
+on:
+  push:
+    branches: [main]
+    # Don't kick off a deploy for changes that can't possibly affect the
+    # running image — saves ~2 minutes on doc-only commits.
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".gitignore"
+      - "LICENSE"
+  workflow_dispatch: {}
+
+concurrency:
+  # If a deploy is in flight and another push lands, cancel the older run so
+  # we always end up on the latest commit and don't pile up SSH sessions.
+  group: deploy-panel-vps
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: SSH into VPS and run `panel update`
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          # `panel update` already handles pull + build + restart + health
+          # check. `set -e` so any failure (git pull conflict, build error,
+          # health-check timeout) fails the GH Action loud and clear.
+          script: |
+            set -e
+            export PATH="/usr/local/bin:/usr/bin:/bin"
+            panel update
+            echo "--- panel version after deploy ---"
+            panel version || true
+
+      - name: Hit /api/health from the public side
+        # Independent verification that the panel is responding on its public
+        # URL — catches the case where the container came up but nginx /
+        # routing is broken. Skipped if PANEL_PUBLIC_URL isn't configured.
+        if: vars.PANEL_PUBLIC_URL != ''
+        run: |
+          set -e
+          echo "Probing ${{ vars.PANEL_PUBLIC_URL }}/api/health"
+          for i in 1 2 3 4 5; do
+            if curl -sf --max-time 10 "${{ vars.PANEL_PUBLIC_URL }}/api/health" > /dev/null; then
+              echo "✓ panel is healthy"
+              exit 0
+            fi
+            echo "attempt $i failed, retrying in 5s…"
+            sleep 5
+          done
+          echo "✗ panel did not become healthy within ~25s after deploy"
+          exit 1
